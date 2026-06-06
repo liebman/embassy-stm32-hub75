@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"editor.formatOnSave": true,
+		"rust-analyzer.cargo.allTargets": false,
+		"rust-analyzer.cargo.targetDir": "target/rust-analyzer",
+		"rust-analyzer.cargo.features": [
+				"stm32wl55", "defmt"
+		],
+		"rust-analyzer.cargo.target": "thumbv7em-none-eabi",
+		// "rust-analyzer.cargo.features": ["esp32s3"],
+		// "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+		//"rust-analyzer.procMacro.attributes.enable": false,
+		//"rust-analyzer.procMacro.enable": false,
+		"rust-analyzer.checkOnSave": true,
+	}
+}

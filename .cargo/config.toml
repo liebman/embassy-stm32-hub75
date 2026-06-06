@@ -1,0 +1,18 @@
+[alias]
+clippy-h = "clippy --example hello --release --features stm32wl55,defmt"
+build-h = "build --example hello --release --features stm32wl55,defmt"
+run-h = "run --example hello --features stm32wl55,defmt"
+
+[target.thumbv7em-none-eabi]
+runner = "probe-rs run --chip STM32WL55JCIx"
+
+[build]
+target = "thumbv7em-none-eabi"
+
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tdefmt.x"]
+
+[unstable]
+build-std = ["alloc", "core"]
+
+[env]
+DEFMT_LOG = "trace"

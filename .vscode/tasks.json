@@ -1,0 +1,17 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build hello",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "build",
+                "--example", "hello",
+                "--features", "stm32wl55,defmt"
+            ],
+            "group": "build",
+            "problemMatcher": ["$rustc"]
+        }
+    ]
+}
