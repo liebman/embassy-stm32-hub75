@@ -142,17 +142,20 @@ impl<T: ChannelInstance> Handler<T::Interrupt> for Hub75DmaHandler<T> {
 
 /// HUB75 LED matrix controller driven by an ISR-based BCM refresh loop.
 ///
-/// Uses a typestate pattern: `Hub75<()>` is the idle state returned by
+/// Uses a typestate pattern: `Hub75<'d, T, Idle>` is the idle state returned by
 /// [`Hub75::new()`]. Calling [`Hub75::start()`] consumes it and returns
-/// `Hub75<FB>`, locking in the framebuffer type. [`Hub75::swap()`] is only
-/// available on the running state and enforces type-safety at compile time.
+/// `Hub75<'d, T, FB>`, locking in the framebuffer type. [`Hub75::swap()`] is
+/// only available on the running state and enforces type-safety at compile time.
 ///
-/// All mutable state lives in statics guarded by `critical_section`.
-pub struct Hub75<FB: FrameBuffer + 'static = Idle> {
+/// The timer `T` is stored directly in the struct (not in the ISR state) since
+/// it only needs to be started once and kept alive.
+pub struct Hub75<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static = Idle> {
+    timer: Timer<'d, T>,
+    _clock_pin: PwmPin<'d, T, Ch1>,
     _fb: PhantomData<&'static FB>,
 }
 
-impl Hub75<Idle> {
+impl<'d, T: GeneralInstance4Channel> Hub75<'d, T, Idle> {
     /// Create a new HUB75 driver and configure hardware.
     ///
     /// Sets up GPIO pins, timer PWM clock, and DMA channel. Does **not** start
@@ -161,7 +164,7 @@ impl Hub75<Idle> {
     /// The `dma_irq` parameter must satisfy bindings for **both**
     /// [`dma::InterruptHandler`] and [`Hub75DmaHandler`] on the same interrupt.
     /// Use [`bind_interrupts!`](embassy_stm32::bind_interrupts) to create it.
-    pub fn new<'d, T: GeneralInstance4Channel, D: UpDma<T>>(
+    pub fn new<D: UpDma<T>>(
         tim: Peri<'d, T>,
         clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
         dma_ch: Peri<'d, D>,
@@ -191,7 +194,7 @@ impl Hub75<Idle> {
         let byte_offset: usize = if pins.base_pin == 0 { 0 } else { 1 };
         let odr_byte_addr = unsafe { (gpio.odr().as_ptr() as *mut u8).add(byte_offset) };
 
-        let _clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
+        let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
 
         // Configure timer for PWM clock output on CH1
         let timer = Timer::new(tim);
@@ -217,7 +220,7 @@ impl Hub75<Idle> {
         let dma_request = dma_ch.request();
         let channel = Channel::new(dma_ch, dma_irq);
 
-        // Store in ISR state. Timer is configured but NOT started yet.
+        // Store DMA state for the ISR. Timer is NOT started yet.
         critical_section::with(|cs| {
             // SAFETY: Channel<'d> → Channel<'static>. The peripheral is consumed
             // by this driver and lives for the program's lifetime.
@@ -237,12 +240,11 @@ impl Hub75<Idle> {
             });
         });
 
-        // Leak the timer and pin — they must live forever since the ISR uses
-        // the hardware they configure. The timer will be started in start().
-        // We store just enough to call start() later.
-        TIMER_START.store(timer.regs_gp16().as_ptr() as u32, Ordering::Relaxed);
-
-        Self { _fb: PhantomData }
+        Self {
+            timer,
+            _clock_pin: clock_pin,
+            _fb: PhantomData,
+        }
     }
 
     /// Start display refresh, consuming the idle handle and returning a
@@ -257,7 +259,7 @@ impl Hub75<Idle> {
     pub fn start<FB: FrameBuffer>(
         self,
         fb: &'static mut FB,
-    ) -> Result<Hub75<FB>, Hub75Error> {
+    ) -> Result<Hub75<'d, T, FB>, Hub75Error> {
         let (planes, plane_count) = planes_from_fb(fb);
         critical_section::with(|cs| {
             let mut borrow = ISR_STATE.borrow_ref_mut(cs);
@@ -290,13 +292,17 @@ impl Hub75<Idle> {
         });
 
         // Start the timer — update events will now trigger DMA.
-        start_timer();
+        self.timer.start();
 
-        Ok(Hub75 { _fb: PhantomData })
+        Ok(Hub75 {
+            timer: self.timer,
+            _clock_pin: self._clock_pin,
+            _fb: PhantomData,
+        })
     }
 }
 
-impl<FB: FrameBuffer + 'static> Hub75<FB> {
+impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB> {
     /// Returns the number of complete BCM frames rendered since [`start()`](Hub75::start).
     pub fn frame_count(&self) -> u32 {
         FRAME_COUNT.load(Ordering::Relaxed)
@@ -347,19 +353,4 @@ impl<FB: FrameBuffer + 'static> Hub75<FB> {
             Ok(unsafe { &mut *(ptr as *mut FB) })
         })
     }
-}
-
-// ---------------------------------------------------------------------------
-// Timer start helper
-// ---------------------------------------------------------------------------
-
-/// Raw pointer to the timer's GP16 register block, stored at init time.
-static TIMER_START: AtomicU32 = AtomicU32::new(0);
-
-fn start_timer() {
-    let ptr = TIMER_START.load(Ordering::Relaxed);
-    assert!(ptr != 0, "Timer not initialised");
-    // SAFETY: pointer was stored from a valid Timer in new().
-    let regs = unsafe { pac::timer::TimGp16::from_ptr(ptr as *mut _) };
-    regs.cr1().modify(|w| w.set_cen(true));
 }
