@@ -1,8 +1,8 @@
 [package]
-name = "stm-hub75"
+name = "embassy-stm32-hub75"
 description = "A Rust driver for HUB75 LED matrix displays on STM32 microcontrollers"
-repository = "https://github.com/liebman/stm-hub75"
-documentation = "https://docs.rs/stm-hub75"
+repository = "https://github.com/liebman/embassy-stm32-hub75"
+documentation = "https://docs.rs/embassy-stm32-hub75"
 keywords = ["stm32", "led-matrix", "hub75", "embedded", "driver"]
 categories = ["embedded", "hardware-support", "no-std"]
 edition = "2021"

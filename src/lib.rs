@@ -1,4 +1,4 @@
-//! # STM-HUB75
+//! # embassy-stm32-hub75
 //!
 //! A `no-std` Rust driver for HUB75-style LED matrix panels on STM32
 //! microcontrollers. HUB75 is a standard interface for driving large, bright,
@@ -92,6 +92,7 @@ impl Hub75Pins8 {
     /// different GPIO port than the first, or
     /// [`Hub75Error::PinsNotConsecutive`] if the pins are not 8
     /// consecutive pins starting at pin 0 or pin 8.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         red1: AnyPin,
         grn1: AnyPin,

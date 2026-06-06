@@ -30,9 +30,9 @@ use embedded_graphics::text::Alignment;
 use embedded_graphics::text::Text;
 use embedded_graphics::Drawable;
 use panic_probe as _;
-use stm_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
-use stm_hub75::framebuffer::compute_rows;
-use stm_hub75::{Color, Hertz, Hub75, Hub75Pins8};
+use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
+use embassy_stm32_hub75::framebuffer::compute_rows;
+use embassy_stm32_hub75::{Color, Hertz, Hub75, Hub75Pins8};
 
 const ROWS: usize = 32;
 const COLS: usize = 64;

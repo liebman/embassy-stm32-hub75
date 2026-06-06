@@ -409,6 +409,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "embassy-stm32-hub75"
+version = "0.1.0"
+dependencies = [
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-stm32",
+ "embassy-time",
+ "embedded-graphics",
+ "hub75-framebuffer",
+ "panic-probe",
+ "static_cell",
+]
+
+[[package]]
 name = "embassy-sync"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -979,24 +997,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0530892bb4fa575ee0da4b86f86c667132a94b74bb72160f58ee5a4afec74c23"
 dependencies = [
  "portable-atomic",
-]
-
-[[package]]
-name = "stm-hub75"
-version = "0.1.0"
-dependencies = [
- "cfg-if",
- "cortex-m",
- "cortex-m-rt",
- "defmt 1.0.1",
- "defmt-rtt",
- "embassy-executor",
- "embassy-stm32",
- "embassy-time",
- "embedded-graphics",
- "hub75-framebuffer",
- "panic-probe",
- "static_cell",
 ]
 
 [[package]]

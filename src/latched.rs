@@ -111,7 +111,7 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T> {
         timer.set_autoreload_preload(true);
 
         let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(TimChannel::Ch1, ((max + 1) / 2).try_into().ok().unwrap());
+        timer.set_compare_value(TimChannel::Ch1, max.div_ceil(2).try_into().ok().unwrap());
 
         timer.enable_channel(TimChannel::Ch1, true);
         timer.generate_update_event();
