@@ -1,17 +1,25 @@
-//! Timer-triggered DMA driver for HUB75 latched panels.
+//! ISR-driven HUB75 latched panel driver.
 //!
-//! Uses an embassy-stm32 [`Timer`] for the pixel clock (PWM output on CH1)
-//! and DMA trigger, with a [`ChannelAndRequest`] performing byte-width
-//! transfers from the framebuffer to the target byte of the GPIO port's
-//! ODR register (either pins 0-7 or pins 8-15).
+//! Once [`Hub75::start()`] is called, DMA transfer-complete interrupts drive
+//! the BCM refresh loop autonomously. The timer free-runs, generating a PWM
+//! pixel clock on CH1 and triggering DMA byte-transfers from the framebuffer
+//! to the GPIO ODR byte.
 //!
-//! The timer update event triggers one DMA byte transfer per tick. The
-//! PWM output provides the panel CLK signal. BCM weighting is achieved
-//! by scaling the timer period for each bit plane.
+//! Embassy's [`dma::InterruptHandler`] clears hardware flags portably; our
+//! [`Hub75DmaHandler`] runs immediately after to advance the BCM state machine
+//! and kick the next DMA transfer. Both are chained on the same interrupt
+//! vector via [`bind_interrupts!`](embassy_stm32::bind_interrupts).
 
-use embassy_stm32::dma::{self, Channel, TransferOptions};
-use embassy_stm32::gpio::{AnyPin, OutputType, Pin};
-use embassy_stm32::interrupt::typelevel::Binding;
+use core::cell::RefCell;
+use core::future::poll_fn;
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::task::{Poll, Waker};
+
+use critical_section::Mutex;
+use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
+use embassy_stm32::gpio::{OutputType, Pin};
+use embassy_stm32::interrupt::typelevel::{Binding, Handler};
 use embassy_stm32::pac;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
@@ -19,58 +27,147 @@ use embassy_stm32::timer::simple_pwm::PwmPin;
 use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
+use crate::bcm::{planes_from_fb, BcmState, PlaneInfo};
 use crate::framebuffer::FrameBuffer;
-use crate::Hub75Pins8;
+use crate::{Hub75Error, Hub75Pins8, Idle};
 
-/// HUB75 LED matrix driver using timer-triggered DMA to GPIO.
-///
-/// Generic over `T`, the timer peripheral (must implement
-/// [`GeneralInstance4Channel`]). The DMA channel is passed at construction
-/// time and must implement [`UpDma<T>`] so the DMAMUX can route timer
-/// update events to it.
-///
-/// # Hardware Requirements
-///
-/// - Data pins (R1, G1, B1, R2, G2, B2, LATCH, BLANK) must be on the same
-///   GPIO port, occupying either pins 0-7 or pins 8-15, in the correct order.
-/// - Clock pin must be a valid timer channel 1 output for timer `T`.
-/// - The timer and DMA channel are consumed by this driver.
-pub struct Hub75<'d, T: GeneralInstance4Channel> {
-    timer: Timer<'d, T>,
-    dma: Channel<'d>,
+// ---------------------------------------------------------------------------
+// ISR shared state
+// ---------------------------------------------------------------------------
+
+struct IsrState {
+    channel: Channel<'static>,
+    transfer: Option<Transfer<'static>>,
     dma_request: dma::Request,
-    _data_pins: [AnyPin; 8],
-    _clock_pin: PwmPin<'d, T, Ch1>,
     odr_byte_addr: *mut u8,
+    bcm: BcmState,
+    current_fb_ptr: *const (),
+    pending_planes: Option<PlaneInfo>,
+    pending_fb_ptr: *const (),
+    returned_fb_ptr: *const (),
 }
 
-impl<'d, T: GeneralInstance4Channel> Hub75<'d, T> {
-    /// Creates a new HUB75 driver.
+// SAFETY: All access is serialised by `critical_section`.
+unsafe impl Send for IsrState {}
+
+static ISR_STATE: Mutex<RefCell<Option<IsrState>>> = Mutex::new(RefCell::new(None));
+static SWAP_DONE: AtomicBool = AtomicBool::new(false);
+static SWAP_WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
+static FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
+
+fn signal_swap_done(cs: critical_section::CriticalSection) {
+    SWAP_DONE.store(true, Ordering::Release);
+    if let Some(waker) = SWAP_WAKER.borrow_ref_mut(cs).take() {
+        waker.wake();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DMA interrupt handler (runs AFTER embassy's dma::InterruptHandler)
+// ---------------------------------------------------------------------------
+
+/// HUB75 DMA interrupt handler.
+///
+/// Must be bound to the same DMA channel interrupt as
+/// [`dma::InterruptHandler`], listed **after** it in [`bind_interrupts!`] so
+/// that embassy clears the hardware flags first.
+///
+/// # Example
+/// ```ignore
+/// bind_interrupts!(struct Irqs {
+///     DMA1_CHANNEL1 =>
+///         dma::InterruptHandler<peripherals::DMA1_CH1>,
+///         Hub75DmaHandler<peripherals::DMA1_CH1>;
+/// });
+/// ```
+pub struct Hub75DmaHandler<T: ChannelInstance> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T: ChannelInstance> Handler<T::Interrupt> for Hub75DmaHandler<T> {
+    unsafe fn on_interrupt() {
+        critical_section::with(|cs| {
+            let mut borrow = ISR_STATE.borrow_ref_mut(cs);
+            let state = match borrow.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+
+            // Drop the completed transfer (instant — DMA already finished).
+            match state.transfer.take() {
+                Some(transfer) => {
+                    drop(transfer);
+                }
+                None => {
+                    defmt::error!("transfer is None");
+                }
+            }
+
+            // Advance BCM state machine.
+            let frame_boundary = state.bcm.advance();
+
+            if frame_boundary {
+                FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
+
+                if let Some(pending) = state.pending_planes.take() {
+                    state.returned_fb_ptr = state.current_fb_ptr;
+                    state.current_fb_ptr = state.pending_fb_ptr;
+                    state.pending_fb_ptr = core::ptr::null();
+                    state.bcm.update_planes(pending);
+                    signal_swap_done(cs);
+                }
+            }
+
+            // Start next DMA transfer.
+            let (ptr, len) = state.bcm.current_plane();
+            let buf = core::slice::from_raw_parts(ptr, len);
+            let new_transfer = state.channel.write_raw(
+                state.dma_request,
+                buf,
+                state.odr_byte_addr,
+                TransferOptions::default(),
+            );
+            // SAFETY: Transfer<'a> contains Channel<'a> which is just a u8 +
+            // PhantomData. The channel it borrows lives in this same static, so
+            // the referent outlives the reference.
+            state.transfer =
+                Some(core::mem::transmute::<Transfer<'_>, Transfer<'static>>(new_transfer));
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public driver handle
+// ---------------------------------------------------------------------------
+
+/// HUB75 LED matrix controller driven by an ISR-based BCM refresh loop.
+///
+/// Uses a typestate pattern: `Hub75<()>` is the idle state returned by
+/// [`Hub75::new()`]. Calling [`Hub75::start()`] consumes it and returns
+/// `Hub75<FB>`, locking in the framebuffer type. [`Hub75::swap()`] is only
+/// available on the running state and enforces type-safety at compile time.
+///
+/// All mutable state lives in statics guarded by `critical_section`.
+pub struct Hub75<FB: FrameBuffer + 'static = Idle> {
+    _fb: PhantomData<&'static FB>,
+}
+
+impl Hub75<Idle> {
+    /// Create a new HUB75 driver and configure hardware.
     ///
-    /// Configures all data pins as high-speed push-pull outputs, sets up
-    /// the timer for PWM clock generation and DMA triggering, and prepares
-    /// the DMA channel for byte-width transfers to GPIO.
+    /// Sets up GPIO pins, timer PWM clock, and DMA channel. Does **not** start
+    /// rendering — call [`Hub75::start()`] with a framebuffer to begin.
     ///
-    /// The data pins are validated: they must all be on the same GPIO port,
-    /// all within the same byte half (0-7 or 8-15), and wired so that R1
-    /// maps to bit 0 of the byte, G1 to bit 1, etc.
-    ///
-    /// # Arguments
-    /// * `tim` - Timer peripheral (e.g. `p.TIM2`)
-    /// * `clock_pin` - GPIO pin for the pixel clock; must be a valid TIM channel 1
-    ///   output for timer `T` (enforced at compile time via [`TimerPin`])
-    /// * `dma_ch` - DMA channel peripheral (e.g. `p.DMA1_CH1`)
-    /// * `dma_irq` - Interrupt binding for the DMA channel
-    /// * `pins` - HUB75 data pin configuration
-    /// * `frequency` - Pixel clock frequency (e.g. `Hertz(10_000_000)`)
-    ///
-    /// # Panics
-    /// Panics if the computed timer period is zero.
-    pub fn new<D: UpDma<T>>(
+    /// The `dma_irq` parameter must satisfy bindings for **both**
+    /// [`dma::InterruptHandler`] and [`Hub75DmaHandler`] on the same interrupt.
+    /// Use [`bind_interrupts!`](embassy_stm32::bind_interrupts) to create it.
+    pub fn new<'d, T: GeneralInstance4Channel, D: UpDma<T>>(
         tim: Peri<'d, T>,
         clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
         dma_ch: Peri<'d, D>,
-        dma_irq: impl Binding<D::Interrupt, dma::InterruptHandler<D>> + 'd,
+        dma_irq: impl Binding<D::Interrupt, dma::InterruptHandler<D>>
+            + Binding<D::Interrupt, Hub75DmaHandler<D>>
+            + 'd,
         pins: Hub75Pins8,
         frequency: Hertz,
     ) -> Self {
@@ -94,7 +191,7 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T> {
         let byte_offset: usize = if pins.base_pin == 0 { 0 } else { 1 };
         let odr_byte_addr = unsafe { (gpio.odr().as_ptr() as *mut u8).add(byte_offset) };
 
-        let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
+        let _clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
 
         // Configure timer for PWM clock output on CH1
         let timer = Timer::new(tim);
@@ -102,10 +199,7 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T> {
         timer.set_frequency(frequency, RoundTo::Slower);
         timer.enable_outputs();
 
-        // PWM mode 2: output LOW when CNT < CCR, HIGH when CNT >= CCR.
-        // DMA writes data at the update event (CNT=0 wrap), then CLK rises
-        // at CCR, ensuring data is stable before the panel latches on the
-        // rising edge.
+        // PWM mode 2: CLK rises at CCR, DMA writes at update event (CNT=0).
         timer.set_output_compare_mode(TimChannel::Ch1, OutputCompareMode::PwmMode2);
         timer.set_output_compare_preload(TimChannel::Ch1, true);
         timer.set_autoreload_preload(true);
@@ -116,51 +210,156 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T> {
         timer.enable_channel(TimChannel::Ch1, true);
         timer.generate_update_event();
 
+        // Enable timer update-event DMA trigger (stays enabled permanently)
+        timer.enable_update_dma(true);
+
         // Build DMA channel + request (DMAMUX routing for timer update event)
         let dma_request = dma_ch.request();
-        let dma = Channel::new(dma_ch, dma_irq);
+        let channel = Channel::new(dma_ch, dma_irq);
 
-        Self {
-            timer,
-            dma,
-            dma_request,
-            _data_pins: pins.pins,
-            _clock_pin: clock_pin,
-            odr_byte_addr,
-        }
+        // Store in ISR state. Timer is configured but NOT started yet.
+        critical_section::with(|cs| {
+            // SAFETY: Channel<'d> → Channel<'static>. The peripheral is consumed
+            // by this driver and lives for the program's lifetime.
+            let channel: Channel<'static> =
+                unsafe { core::mem::transmute::<Channel<'_>, Channel<'static>>(channel) };
+
+            *ISR_STATE.borrow_ref_mut(cs) = Some(IsrState {
+                channel,
+                transfer: None,
+                dma_request,
+                odr_byte_addr,
+                bcm: BcmState::new(),
+                current_fb_ptr: core::ptr::null(),
+                pending_planes: None,
+                pending_fb_ptr: core::ptr::null(),
+                returned_fb_ptr: core::ptr::null(),
+            });
+        });
+
+        // Leak the timer and pin — they must live forever since the ISR uses
+        // the hardware they configure. The timer will be started in start().
+        // We store just enough to call start() later.
+        TIMER_START.store(timer.regs_gp16().as_ptr() as u32, Ordering::Relaxed);
+
+        Self { _fb: PhantomData }
     }
 
-    /// Render a full frame from the framebuffer to the display.
+    /// Start display refresh, consuming the idle handle and returning a
+    /// running handle typed to the framebuffer.
     ///
-    /// BCM weighting is achieved by repeating each plane's DMA transfer
-    /// proportionally: plane 0 (MSB) is output 2^(N-1) times, while
-    /// plane N-1 (LSB) is output once. The timer frequency stays constant.
-    pub async fn render(&mut self, fb: &impl FrameBuffer) {
-        let plane_count = fb.plane_count();
+    /// The framebuffer must be `'static` because the ISR will continuously
+    /// read from it until [`Hub75::swap()`] replaces it. Exclusive access is
+    /// surrendered to the ISR; the caller gets it back via [`Hub75::swap()`].
+    ///
+    /// # Panics
+    /// Panics if called while a transfer is already in flight.
+    pub fn start<FB: FrameBuffer>(
+        self,
+        fb: &'static mut FB,
+    ) -> Result<Hub75<FB>, Hub75Error> {
+        let (planes, plane_count) = planes_from_fb(fb);
+        critical_section::with(|cs| {
+            let mut borrow = ISR_STATE.borrow_ref_mut(cs);
+            let state = borrow.as_mut().expect("Hub75 not initialised");
 
-        for plane_idx in 0..plane_count {
-            let (ptr, len) = fb.plane_ptr_len(plane_idx);
-            let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
-
-            // plane 0 = MSB → repeat 2^(N-1) times; plane N-1 = LSB → repeat 1 time
-            let repeats = 1u32 << (plane_count - 1 - plane_idx);
-
-            self.timer.enable_update_dma(true);
-            self.timer.start();
-            for _ in 0..repeats {
-                unsafe {
-                    self.dma
-                        .write(
-                            self.dma_request,
-                            buf,
-                            self.odr_byte_addr,
-                            TransferOptions::default(),
-                        )
-                        .await;
-                }
+            if state.transfer.is_some() {
+                panic!("start() called while already running");
             }
-            self.timer.stop();
-            self.timer.enable_update_dma(false);
-        }
+
+            state.bcm.reset_with_planes(planes, plane_count);
+            state.current_fb_ptr = fb as *const FB as *const ();
+            state.pending_planes = None;
+            state.pending_fb_ptr = core::ptr::null();
+            state.returned_fb_ptr = core::ptr::null();
+
+            SWAP_DONE.store(false, Ordering::Relaxed);
+            FRAME_COUNT.store(0, Ordering::Relaxed);
+
+            // Kick the first DMA transfer.
+            let (ptr, len) = state.bcm.current_plane();
+            let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
+            let transfer = unsafe {
+                state
+                    .channel
+                    .write_raw(state.dma_request, buf, state.odr_byte_addr, TransferOptions::default())
+            };
+            // SAFETY: same transmute justification as in on_interrupt.
+            state.transfer =
+                Some(unsafe { core::mem::transmute::<Transfer<'_>, Transfer<'static>>(transfer) });
+        });
+
+        // Start the timer — update events will now trigger DMA.
+        start_timer();
+
+        Ok(Hub75 { _fb: PhantomData })
     }
+}
+
+impl<FB: FrameBuffer + 'static> Hub75<FB> {
+    /// Returns the number of complete BCM frames rendered since [`start()`](Hub75::start).
+    pub fn frame_count(&self) -> u32 {
+        FRAME_COUNT.load(Ordering::Relaxed)
+    }
+
+    /// Replace the displayed framebuffer, returning the previously-displayed one.
+    ///
+    /// Queues `new_fb` for display and yields until the ISR reaches a BCM
+    /// frame boundary, at which point plane pointers are swapped atomically.
+    /// Returns an exclusive reference to the old framebuffer that is no longer
+    /// being read by the ISR.
+    ///
+    /// Type safety is enforced at compile time: `swap()` only accepts the same
+    /// framebuffer type `FB` that was passed to [`start()`](Hub75::start).
+    pub async fn swap(&self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
+        let (new_planes, _) = planes_from_fb(new_fb);
+
+        critical_section::with(|cs| {
+            let mut borrow = ISR_STATE.borrow_ref_mut(cs);
+            let state = borrow.as_mut().expect("Hub75 not initialised");
+            state.pending_planes = Some(new_planes);
+            state.pending_fb_ptr = new_fb as *const FB as *const ();
+            SWAP_DONE.store(false, Ordering::Relaxed);
+        });
+
+        poll_fn(|cx| {
+            if SWAP_DONE.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+            critical_section::with(|cs| {
+                if SWAP_DONE.load(Ordering::Relaxed) {
+                    return Poll::Ready(());
+                }
+                *SWAP_WAKER.borrow_ref_mut(cs) = Some(cx.waker().clone());
+                Poll::Pending
+            })
+        })
+        .await;
+
+        critical_section::with(|cs| {
+            let borrow = ISR_STATE.borrow_ref(cs);
+            let state = borrow.as_ref().expect("Hub75 not initialised");
+            let ptr = state.returned_fb_ptr;
+            // SAFETY: The ISR atomically swapped away from this buffer at the
+            // frame boundary — it is no longer being read. The pointer originated
+            // from a `&'static mut FB` passed to a previous start() or swap()
+            // call with the same concrete type FB (enforced by the type system).
+            Ok(unsafe { &mut *(ptr as *mut FB) })
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timer start helper
+// ---------------------------------------------------------------------------
+
+/// Raw pointer to the timer's GP16 register block, stored at init time.
+static TIMER_START: AtomicU32 = AtomicU32::new(0);
+
+fn start_timer() {
+    let ptr = TIMER_START.load(Ordering::Relaxed);
+    assert!(ptr != 0, "Timer not initialised");
+    // SAFETY: pointer was stored from a valid Timer in new().
+    let regs = unsafe { pac::timer::TimGp16::from_ptr(ptr as *mut _) };
+    regs.cr1().modify(|w| w.set_cen(true));
 }

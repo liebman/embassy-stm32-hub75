@@ -5,10 +5,17 @@
 //! and colorful RGB LED displays, commonly used in digital signage and art
 //! installations.
 //!
-//! This library uses timer-triggered DMA to output framebuffer data directly
-//! to a GPIO port, with the timer simultaneously generating the pixel clock
-//! via a PWM channel output. The framebuffer is provided by the
-//! [`hub75-framebuffer`](https://crates.io/crates/hub75-framebuffer) crate.
+//! This library uses an ISR-driven DMA refresh loop to continuously output
+//! framebuffer data to a GPIO port. A timer generates the pixel clock via PWM
+//! and triggers DMA byte-transfers on each update event. Once
+//! [`Hub75::start()`] is called, rendering happens entirely in the background
+//! via DMA transfer-complete interrupts — no CPU involvement per pixel.
+//!
+//! ## Double Buffering
+//!
+//! The driver supports double-buffered operation via [`Hub75::swap()`]. The
+//! application writes to one framebuffer while the ISR renders from another,
+//! swapping atomically at frame boundaries.
 //!
 //! ## Latched (8-bit) Mode
 //!
@@ -28,6 +35,20 @@
 //! per pixel per plane, and the driver outputs the data via DMA without any
 //! format conversion.
 //!
+//! ## Interrupt Binding
+//!
+//! The DMA channel interrupt must be bound to **both** embassy's
+//! [`dma::InterruptHandler`](embassy_stm32::dma::InterruptHandler) and this
+//! crate's [`Hub75DmaHandler`], in that order:
+//!
+//! ```ignore
+//! bind_interrupts!(struct Irqs {
+//!     DMA1_CHANNEL1 =>
+//!         dma::InterruptHandler<peripherals::DMA1_CH1>,
+//!         Hub75DmaHandler<peripherals::DMA1_CH1>;
+//! });
+//! ```
+//!
 //! ## Crate Features
 //!
 //! - `stm32wl55`: Enable support for the STM32WL55
@@ -41,8 +62,28 @@ pub use hub75_framebuffer as framebuffer;
 /// The color type used by the HUB75 driver.
 pub use hub75_framebuffer::Color;
 
+mod bcm;
 mod latched;
-pub use latched::Hub75;
+
+/// Typestate marker for an idle [`Hub75`] that has not yet been started.
+///
+/// Implements [`FrameBuffer`](framebuffer::FrameBuffer) trivially so it can
+/// serve as the default type parameter; never instantiated at runtime.
+pub struct Idle;
+
+impl framebuffer::FrameBuffer for Idle {
+    fn get_word_size(&self) -> framebuffer::WordSize {
+        framebuffer::WordSize::Eight
+    }
+    fn plane_count(&self) -> usize {
+        0
+    }
+    fn plane_ptr_len(&self, _: usize) -> (*const u8, usize) {
+        (core::ptr::null(), 0)
+    }
+}
+
+pub use latched::{Hub75, Hub75DmaHandler};
 
 use embassy_stm32::gpio::{AnyPin, Pin};
 
