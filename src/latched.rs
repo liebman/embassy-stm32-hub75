@@ -119,9 +119,6 @@ impl<T: ChannelInstance> Handler<T::Interrupt> for Hub75DmaHandler<T> {
                 }
             }
 
-            // Reset the generic timer's counter to 0 to synchronize clock phase
-            core::ptr::write_volatile(state.timer_cnt_addr, 0);
-
             // Start next DMA transfer.
             let (ptr, len) = state.bcm.current_plane();
             let buf = core::slice::from_raw_parts(ptr, len);
@@ -131,6 +128,10 @@ impl<T: ChannelInstance> Handler<T::Interrupt> for Hub75DmaHandler<T> {
                 state.odr_byte_addr,
                 TransferOptions::default(),
             );
+
+            // Reset the generic timer's counter to 0 to synchronize clock phase
+            core::ptr::write_volatile(state.timer_cnt_addr, 0);
+
             // SAFETY: Transfer<'a> contains Channel<'a> which is just a u8 +
             // PhantomData. The channel it borrows lives in this same static, so
             // the referent outlives the reference.
@@ -217,7 +218,7 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T, Idle> {
         timer.set_autoreload_preload(true);
 
         let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(TimChannel::Ch1, max.div_ceil(2).try_into().ok().unwrap());
+        timer.set_compare_value(TimChannel::Ch1, (max * 4 / 5).try_into().ok().unwrap());
 
         timer.enable_channel(TimChannel::Ch1, true);
         timer.generate_update_event();

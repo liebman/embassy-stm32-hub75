@@ -197,7 +197,7 @@ async fn main(spawner: Spawner) {
     .expect("invalid pin configuration");
 
     info!("Initializing hub75");
-    let hub75 = Hub75::new(p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins, Hertz(22_000_000));
+    let hub75 = Hub75::new(p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins, Hertz(20_000_000));
 
     info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());

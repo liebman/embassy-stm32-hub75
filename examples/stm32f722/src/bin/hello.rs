@@ -41,7 +41,7 @@ use embassy_stm32_hub75::{Color, Hertz, Hub75, Hub75DmaHandler, Hub75Pins8};
 const ROWS: usize = 64;
 const COLS: usize = 64;
 const NROWS: usize = compute_rows(ROWS);
-const PLANES: usize = 6;
+const PLANES: usize = 1;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
@@ -95,7 +95,7 @@ async fn main(_spawner: Spawner) {
     .expect("invalid pin configuration");
 
     info!("Initializing hub75");
-    let hub75 = Hub75::new(p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins, Hertz(11_000_000));
+    let hub75 = Hub75::new(p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins, Hertz(20_000_000));
 
     info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());
