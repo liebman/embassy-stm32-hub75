@@ -65,6 +65,7 @@ defmt = [
     "embedded-graphics/defmt",
 ]
 stm32wl55 = ["embassy-stm32/stm32wl55jc-cm4"]
+stm32h722 = ["embassy-stm32/stm32f722ze"]
 
 [package.metadata.docs.rs]
 features = ["stm32wl55"]

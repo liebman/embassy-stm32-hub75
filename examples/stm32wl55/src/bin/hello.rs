@@ -21,12 +21,19 @@ use core::mem::MaybeUninit;
 use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
+use embassy_stm32::gpio::Level;
+use embassy_stm32::gpio::Output;
+use embassy_stm32::gpio::Speed;
 use embassy_stm32::rcc::{MSIRange, Sysclk};
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embedded_graphics::geometry::Point;
-use embedded_graphics::mono_font::ascii::FONT_5X7;
+use embedded_graphics::geometry::Size;
+use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::RgbColor;
+use embedded_graphics::primitives::Primitive;
+use embedded_graphics::primitives::PrimitiveStyleBuilder;
+use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::text::Alignment;
 use embedded_graphics::text::Text;
 use embedded_graphics::Drawable;
@@ -37,10 +44,12 @@ use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
 use embassy_stm32_hub75::{Color, Hertz, Hub75, Hub75DmaHandler, Hub75Pins8};
 
-const ROWS: usize = 32;
+use numtoa::NumToA;
+
+const ROWS: usize = 64;
 const COLS: usize = 64;
 const NROWS: usize = compute_rows(ROWS);
-const PLANES: usize = 7;
+const PLANES: usize = 1;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
@@ -66,6 +75,8 @@ async fn main(_spawner: Spawner) {
     let p = embassy_stm32::init_primary(config, &SHARED_DATA);
     info!("Primary initialized (48 MHz MSI)");
 
+    let _pwm = Output::new(p.PC3, Level::High, Speed::High);
+
     info!("Initializing pins");
     let pins = Hub75Pins8::new(
         (*p.PB8).into(),
@@ -80,32 +91,65 @@ async fn main(_spawner: Spawner) {
     .expect("invalid pin configuration");
 
     info!("Initializing hub75");
-    let hub75 = Hub75::new(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(20_000_000));
+    let hub75 = Hub75::new(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000));
 
     info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());
     let fb1 = FB1.init(FBType::new());
 
     let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_5X7)
+        .font(&FONT_6X10)
         .text_color(Color::YELLOW)
         .background_color(Color::BLACK)
         .build();
 
-    info!("Drawing text into fb0");
-    Text::with_alignment("Hello", Point::new(32, 20), text_style, Alignment::Center)
-        .draw(fb0)
-        .expect("failed to draw text");
+    let rect_style = PrimitiveStyleBuilder::new()
+        .stroke_color(Color::GREEN)
+        .stroke_width(1)
+        .build();
+    let rect_style_red = PrimitiveStyleBuilder::new()
+        .stroke_color(Color::RED)
+        .stroke_width(1)
+        .build();
 
     info!("Starting ISR-driven rendering");
     let hub75 = hub75.start(fb0).expect("failed to start Hub75");
     info!("Hub75 started");
     // Double-buffered loop: draw into fb1, swap, repeat.
     let mut write_fb: &'static mut FBType = fb1;
+    let mut last_frame_count: u32 = 0;
+    let mut count = 0;
+    let mut last_count_time = embassy_time::Instant::now();
     loop {
-        Text::with_alignment("Hello", Point::new(32, 20), text_style, Alignment::Center)
+        let mut buffer = [0u8; 32];
+
+        let now = embassy_time::Instant::now();
+        if now.duration_since(last_count_time) > embassy_time::Duration::from_millis(1000) {
+            let frame_count = hub75.frame_count();
+            count = frame_count.saturating_sub(last_frame_count);
+            last_count_time = now;
+            last_frame_count = frame_count;
+        }
+
+        let renders = count.numtoa_str(10, &mut buffer);
+
+        write_fb.erase();
+        Text::with_alignment("Hello", Point::new(32, 35), text_style, Alignment::Center)
             .draw(write_fb)
             .expect("failed to draw text");
+
+        Text::with_alignment(renders, Point::new(32, 52), text_style, Alignment::Center)
+            .draw(write_fb)
+            .expect("failed to draw text");
+
+        Rectangle::new(Point { x: 1, y: 1 }, Size::new(62, 62))
+            .into_styled(rect_style)
+            .draw(write_fb)
+            .expect("failed to draw rectangle");
+        Rectangle::new(Point { x: 0, y: 0 }, Size::new(64, 64))
+            .into_styled(rect_style_red)
+            .draw(write_fb)
+            .expect("failed to draw rectangle");
 
         write_fb = hub75.swap(write_fb).await.expect("swap failed");
     }

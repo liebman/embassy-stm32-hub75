@@ -40,6 +40,7 @@ struct IsrState {
     transfer: Option<Transfer<'static>>,
     dma_request: dma::Request,
     odr_byte_addr: *mut u8,
+    timer_cnt_addr: *mut u32,
     bcm: BcmState,
     current_fb_ptr: *const (),
     pending_planes: Option<PlaneInfo>,
@@ -118,6 +119,9 @@ impl<T: ChannelInstance> Handler<T::Interrupt> for Hub75DmaHandler<T> {
                 }
             }
 
+            // Reset the generic timer's counter to 0 to synchronize clock phase
+            core::ptr::write_volatile(state.timer_cnt_addr, 0);
+
             // Start next DMA transfer.
             let (ptr, len) = state.bcm.current_plane();
             let buf = core::slice::from_raw_parts(ptr, len);
@@ -181,7 +185,7 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T, Idle> {
             gpio.moder()
                 .modify(|w| w.set_moder(n, pac::gpio::vals::Moder::OUTPUT));
             gpio.ospeedr()
-                .modify(|w| w.set_ospeedr(n, pac::gpio::vals::Ospeedr::VERY_HIGH_SPEED));
+                .modify(|w| w.set_ospeedr(n, pac::gpio::vals::Ospeedr::LOW_SPEED));
             gpio.otyper()
                 .modify(|w| w.set_ot(n, pac::gpio::vals::Ot::PUSH_PULL));
         }
@@ -198,6 +202,11 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T, Idle> {
 
         // Configure timer for PWM clock output on CH1
         let timer = Timer::new(tim);
+
+        // Grab the physical memory address of the Counter (CNT) register directly 
+        // from the timer object we just created.
+        let timer_cnt_addr = timer.regs_core().cnt().as_ptr() as *mut u32;
+
         timer.set_counting_mode(CountingMode::EdgeAlignedUp);
         timer.set_frequency(frequency, RoundTo::Slower);
         timer.enable_outputs();
@@ -232,6 +241,7 @@ impl<'d, T: GeneralInstance4Channel> Hub75<'d, T, Idle> {
                 transfer: None,
                 dma_request,
                 odr_byte_addr,
+                timer_cnt_addr,
                 bcm: BcmState::new(),
                 current_fb_ptr: core::ptr::null(),
                 pending_planes: None,

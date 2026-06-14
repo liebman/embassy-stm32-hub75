@@ -1,0 +1,43 @@
+[package]
+name = "stm32wl55-examples"
+description = "Examples for the embassy-stm32-hub75 crate"
+repository = "https://github.com/liebman/embassy-stm32-hub75"
+edition = "2021"
+version = "0.1.0"
+
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = "s"
+overflow-checks = false
+
+[profile.dev]
+debug = true  # Symbols are nice and they don't increase the size on Flash
+opt-level = 2
+
+[dependencies]
+embassy-stm32-hub75 = { path = "../../", features = ["defmt"] }
+cortex-m-rt = "0.7"
+defmt-rtt = "1.1.0"
+defmt = "1.1.0"
+embassy-stm32 = { version = "0.6.0", features = [
+    "time-driver-tim2",
+    "memory-x",
+    "unstable-pac",
+    "stm32f722ze",
+] }
+embassy-executor = { version = "0.10.0" }
+embedded-graphics = "0.8.2"
+hub75-framebuffer = { version = "0.8.0", features = ["defmt"] }
+embassy-time = "0.5.1"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+static_cell = "2.1.1"
+numtoa = "1.0.0"
+heapless = "0.9.3"
+
+
+[patch.crates-io]
+hub75-framebuffer = { path = "../../../hub75-framebuffer" }
