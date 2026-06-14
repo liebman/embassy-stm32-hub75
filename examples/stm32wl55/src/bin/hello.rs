@@ -42,7 +42,7 @@ use static_cell::StaticCell;
 
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
-use embassy_stm32_hub75::{Color, Hertz, Hub75, Hub75DmaHandler, Hub75Pins8};
+use embassy_stm32_hub75::{hub75_define, Color, Hertz, Hub75Pins8};
 
 use numtoa::NumToA;
 
@@ -53,10 +53,12 @@ const PLANES: usize = 1;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
+hub75_define!(hub75, embassy_stm32::peripherals::TIM2, embassy_stm32::peripherals::DMA1_CH1);
+
 bind_interrupts!(struct Irqs {
     DMA1_CHANNEL1 =>
         dma::InterruptHandler<peripherals::DMA1_CH1>,
-        Hub75DmaHandler<peripherals::DMA1_CH1>;
+        hub75::Hub75DmaHandler;
 });
 
 #[link_section = ".shared"]
@@ -91,7 +93,7 @@ async fn main(_spawner: Spawner) {
     .expect("invalid pin configuration");
 
     info!("Initializing hub75");
-    let hub75 = Hub75::new(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000));
+    let hub75 = hub75::Hub75::new(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000));
 
     info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());

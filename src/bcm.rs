@@ -8,13 +8,16 @@ use core::ptr::null;
 
 use crate::framebuffer::FrameBuffer;
 
-pub(crate) const MAX_PLANES: usize = 8;
+#[doc(hidden)]
+pub const MAX_PLANES: usize = 8;
 
 /// Per-plane pointer + byte-length, indexed by plane number.
-pub(crate) type PlaneInfo = [(*const u8, usize); MAX_PLANES];
+#[doc(hidden)]
+pub type PlaneInfo = [(*const u8, usize); MAX_PLANES];
 
 /// Extract plane pointers from a framebuffer into a `PlaneInfo` array.
-pub(crate) fn planes_from_fb(fb: &impl FrameBuffer) -> (PlaneInfo, usize) {
+#[doc(hidden)]
+pub fn planes_from_fb(fb: &impl FrameBuffer) -> (PlaneInfo, usize) {
     let plane_count = fb.plane_count();
     assert!(
         plane_count > 0 && plane_count <= MAX_PLANES,
@@ -31,7 +34,8 @@ pub(crate) fn planes_from_fb(fb: &impl FrameBuffer) -> (PlaneInfo, usize) {
 ///
 /// Walks through bitplanes with exponential weighting: plane 0 (MSB) is
 /// repeated 2^(N-1) times, plane N-1 (LSB) is repeated once.
-pub(crate) struct BcmState {
+#[doc(hidden)]
+pub struct BcmState {
     planes: PlaneInfo,
     plane_count: usize,
     current_plane: usize,

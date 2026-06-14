@@ -1,17 +1,17 @@
-//! Example: HUB75 latched panel on PB8-PB15 with TIM2 CLK on PA0.
+//! Example: HUB75 latched panel on PD0-PD7 with TIM1 CLK on PE9.
 //!
-//! Draws "Hello" on a 64x32 panel using bitplane latched framebuffer with
+//! Draws "Hello" on a 64x64 panel using bitplane latched framebuffer with
 //! ISR-driven continuous rendering and double buffering.
 //!
 //! Pin wiring:
-//!   PB8:  R1      PB12: G2
-//!   PB9:  G1      PB13: B2
-//!   PB10: B1      PB14: LATCH
-//!   PB11: R2      PB15: BLANK/OE
-//!   PA0:  CLK (TIM2_CH1)
+//!   PD0:  R1      PD4: G2
+//!   PD1:  G1      PD5: B2
+//!   PD2:  B1      PD6: LATCH
+//!   PD3:  R2      PD7: BLANK/OE
+//!   PE9:  CLK (TIM1_CH1)
 //!
-//! DMA1 Channel 1 is used for framebuffer → GPIO transfers, triggered
-//! by TIM2 update events. The ISR-driven refresh loop runs autonomously.
+//! DMA2 Channel 5 is used for framebuffer → GPIO transfers, triggered
+//! by TIM1 update events. The ISR-driven refresh loop runs autonomously.
 
 #![no_std]
 #![no_main]
@@ -36,7 +36,7 @@ use static_cell::StaticCell;
 
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
-use embassy_stm32_hub75::{Color, Hertz, Hub75, Hub75DmaHandler, Hub75Pins8};
+use embassy_stm32_hub75::{hub75_define, Color, Hertz, Hub75Pins8};
 
 const ROWS: usize = 64;
 const COLS: usize = 64;
@@ -45,10 +45,12 @@ const PLANES: usize = 1;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
+hub75_define!(hub75, embassy_stm32::peripherals::TIM1, embassy_stm32::peripherals::DMA2_CH5);
+
 bind_interrupts!(struct Irqs {
     DMA2_STREAM5 =>
         dma::InterruptHandler<peripherals::DMA2_CH5>,
-        Hub75DmaHandler<peripherals::DMA2_CH5>;
+        hub75::Hub75DmaHandler;
 });
 
 static FB0: StaticCell<FBType> = StaticCell::new();
@@ -68,13 +70,8 @@ async fn main(_spawner: Spawner) {
         divq: Some(PllQDiv::DIV9),
         divr: Some(PllRDiv::DIV2),
     });
-        // HCLK (AHB bus) = SYSCLK / 1 = 216 MHz
-    config.rcc.ahb_pre = AHBPrescaler::DIV1; 
-
-    // PCLK1 (APB1 bus) = HCLK / 4 = 54 MHz (Safe: usually max 54 MHz on F7)
-    config.rcc.apb1_pre = APBPrescaler::DIV4; 
-
-    // PCLK2 (APB2 bus) = HCLK / 2 = 108 MHz (Safe: usually max 108 MHz on F7)
+    config.rcc.ahb_pre = AHBPrescaler::DIV1;
+    config.rcc.apb1_pre = APBPrescaler::DIV4;
     config.rcc.apb2_pre = APBPrescaler::DIV2;
 
     let p = embassy_stm32::init(config);
@@ -95,7 +92,7 @@ async fn main(_spawner: Spawner) {
     .expect("invalid pin configuration");
 
     info!("Initializing hub75");
-    let hub75 = Hub75::new(p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins, Hertz(20_000_000));
+    let hub75 = hub75::Hub75::new(p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins, Hertz(20_000_000));
 
     info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());

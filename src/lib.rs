@@ -35,17 +35,21 @@
 //! per pixel per plane, and the driver outputs the data via DMA without any
 //! format conversion.
 //!
-//! ## Interrupt Binding
+//! ## Defining an Instance
 //!
-//! The DMA channel interrupt must be bound to **both** embassy's
-//! [`dma::InterruptHandler`](embassy_stm32::dma::InterruptHandler) and this
-//! crate's [`Hub75DmaHandler`], in that order:
+//! Use the [`hub75_define!`] macro to create a driver module bound to specific
+//! timer and DMA channel peripherals:
 //!
 //! ```ignore
+//! use embassy_stm32::{bind_interrupts, dma, peripherals};
+//! use embassy_stm32_hub75::hub75_define;
+//!
+//! hub75_define!(hub75, embassy_stm32::peripherals::TIM2, embassy_stm32::peripherals::DMA1_CH1);
+//!
 //! bind_interrupts!(struct Irqs {
 //!     DMA1_CHANNEL1 =>
 //!         dma::InterruptHandler<peripherals::DMA1_CH1>,
-//!         Hub75DmaHandler<peripherals::DMA1_CH1>;
+//!         hub75::Hub75DmaHandler;
 //! });
 //! ```
 //!
@@ -62,8 +66,16 @@ pub use hub75_framebuffer as framebuffer;
 /// The color type used by the HUB75 driver.
 pub use hub75_framebuffer::Color;
 
-mod bcm;
+#[doc(hidden)]
+pub mod bcm;
 mod latched;
+
+/// Re-exports used by the [`hub75_define!`] macro. Not part of the public API.
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use critical_section;
+    pub use embassy_stm32;
+}
 
 /// Typestate marker for an idle [`Hub75`] that has not yet been started.
 ///
@@ -82,8 +94,6 @@ impl framebuffer::FrameBuffer for Idle {
         (core::ptr::null(), 0)
     }
 }
-
-pub use latched::{Hub75, Hub75DmaHandler};
 
 use embassy_stm32::gpio::{AnyPin, Pin};
 
@@ -108,17 +118,18 @@ pub use embassy_stm32::time::Hertz;
 /// For upper-byte wiring, pin N+8 corresponds to bit N.
 /// For lower-byte wiring, pin N corresponds to bit N.
 ///
-/// The clock pin is passed separately to the [`Hub75`] constructor as a
-/// raw GPIO pin. It must be a valid timer channel 1 output for the chosen
+/// The clock pin is passed separately to the [`Hub75`](hub75_define) constructor
+/// as a raw GPIO pin. It must be a valid timer channel 1 output for the chosen
 /// timer (enforced at compile time). The driver configures it as a PWM
 /// output internally.
 ///
 /// Use [`Hub75Pins8::new()`] to construct; it validates pin layout at
 /// creation time.
 pub struct Hub75Pins8 {
-    pub(crate) pins: [AnyPin; 8],
+    /// The 8 GPIO pins in order.
+    pub pins: [AnyPin; 8],
     /// First pin number in the group (0 or 8).
-    pub(crate) base_pin: u8,
+    pub base_pin: u8,
 }
 
 impl Hub75Pins8 {
@@ -180,7 +191,7 @@ impl Hub75Pins8 {
     }
 
     /// The BLANK pin (index 7 in the group).
-    pub(crate) fn blank_pin_num(&self) -> usize {
+    pub fn blank_pin_num(&self) -> usize {
         (self.base_pin + 7) as usize
     }
 }
