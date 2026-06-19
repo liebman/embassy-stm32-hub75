@@ -7,9 +7,10 @@
 //!
 //! This library uses an ISR-driven DMA refresh loop to continuously output
 //! framebuffer data to a GPIO port. A timer generates the pixel clock via PWM
-//! and triggers DMA byte-transfers on each update event. Once
-//! [`Hub75::start()`] is called, rendering happens entirely in the background
-//! via DMA transfer-complete interrupts — no CPU involvement per pixel.
+//! and triggers DMA byte-transfers on each update event. Once the driver is
+//! initialised via [`hub75_define!`]'s `init()` function, rendering happens
+//! entirely in the background via DMA transfer-complete interrupts — no CPU
+//! involvement per pixel.
 //!
 //! ## Double Buffering
 //!
@@ -51,6 +52,8 @@
 //!         dma::InterruptHandler<peripherals::DMA1_CH1>,
 //!         hub75::Hub75DmaHandler;
 //! });
+//!
+//! let hub75 = hub75::init(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000), fb);
 //! ```
 //!
 //! ## Crate Features
@@ -68,31 +71,13 @@ pub use hub75_framebuffer::Color;
 
 #[doc(hidden)]
 pub mod bcm;
-mod latched;
+pub mod latched;
 
 /// Re-exports used by the [`hub75_define!`] macro. Not part of the public API.
 #[doc(hidden)]
 pub mod __macro_support {
     pub use critical_section;
     pub use embassy_stm32;
-}
-
-/// Typestate marker for an idle [`Hub75`] that has not yet been started.
-///
-/// Implements [`FrameBuffer`](framebuffer::FrameBuffer) trivially so it can
-/// serve as the default type parameter; never instantiated at runtime.
-pub struct Idle;
-
-impl framebuffer::FrameBuffer for Idle {
-    fn get_word_size(&self) -> framebuffer::WordSize {
-        framebuffer::WordSize::Eight
-    }
-    fn plane_count(&self) -> usize {
-        0
-    }
-    fn plane_ptr_len(&self, _: usize) -> (*const u8, usize) {
-        (core::ptr::null(), 0)
-    }
 }
 
 use embassy_stm32::gpio::{AnyPin, Pin};
@@ -118,10 +103,10 @@ pub use embassy_stm32::time::Hertz;
 /// For upper-byte wiring, pin N+8 corresponds to bit N.
 /// For lower-byte wiring, pin N corresponds to bit N.
 ///
-/// The clock pin is passed separately to the [`Hub75`](hub75_define) constructor
-/// as a raw GPIO pin. It must be a valid timer channel 1 output for the chosen
-/// timer (enforced at compile time). The driver configures it as a PWM
-/// output internally.
+/// The clock pin is passed separately to the `init()` constructor as a raw
+/// GPIO pin. It must be a valid timer channel 1 output for the chosen timer
+/// (enforced at compile time). The driver configures it as a PWM output
+/// internally.
 ///
 /// Use [`Hub75Pins8::new()`] to construct; it validates pin layout at
 /// creation time.
@@ -161,7 +146,6 @@ impl Hub75Pins8 {
         let port = pins_ref[0].port();
         let first = pins_ref[0].pin();
 
-        // R1 must start at pin 0 or pin 8
         if first != 0 && first != 8 {
             return Err(Hub75Error::PinsNotConsecutive {
                 index: 0,

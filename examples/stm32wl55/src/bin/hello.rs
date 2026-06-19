@@ -92,9 +92,6 @@ async fn main(_spawner: Spawner) {
     )
     .expect("invalid pin configuration");
 
-    info!("Initializing hub75");
-    let hub75 = hub75::Hub75::new(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000));
-
     info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());
     let fb1 = FB1.init(FBType::new());
@@ -115,7 +112,7 @@ async fn main(_spawner: Spawner) {
         .build();
 
     info!("Starting ISR-driven rendering");
-    let hub75 = hub75.start(fb0).expect("failed to start Hub75");
+    let hub75 = hub75::init(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000), fb0);
     info!("Hub75 started");
     // Double-buffered loop: draw into fb1, swap, repeat.
     let mut write_fb: &'static mut FBType = fb1;
