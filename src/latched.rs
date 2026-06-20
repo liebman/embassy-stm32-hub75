@@ -1,6 +1,6 @@
 //! ISR-driven HUB75 latched panel driver.
 //!
-//! Use the [`hub75_define!`] macro to create a per-instance module containing
+//! Use the `hub75_define!` macro to create a per-instance module containing
 //! only the timer static, ISR handler, and a thin `init()` wrapper. All driver
 //! logic lives in library code ([`Hub75`], [`IsrCore`]) with full IDE support.
 //!
@@ -31,7 +31,7 @@ use crate::{Config, Hub75Error, Hub75Pins8};
 // Timer slot type alias (used by macro and Hub75::new)
 // ---------------------------------------------------------------------------
 
-/// Type alias for the timer static slot used by [`hub75_define!`].
+/// Type alias for the timer static slot used by `hub75_define!`.
 #[doc(hidden)]
 pub type TimerSlot<T> = Mutex<RefCell<Option<ManuallyDrop<Timer<'static, T>>>>>;
 
@@ -52,7 +52,8 @@ struct IsrCoreState {
 }
 
 /// Per-instance ISR core state, shared between the ISR handler and the
-/// [`Hub75`] driver. Created by [`hub75_define!`] as a `static`.
+/// `Hub75` driver. Created by `hub75_define!` as a `static`.
+#[doc(hidden)]
 pub struct IsrCore {
     state: Mutex<RefCell<Option<IsrCoreState>>>,
     swap_done: AtomicBool,
@@ -109,9 +110,12 @@ impl IsrCore {
         let (ptr, len) = state.bcm.current_plane();
         let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
         let new_transfer = unsafe {
-            state
-                .channel
-                .write_raw(state.dma_request, buf, state.odr_byte_addr, TransferOptions::default())
+            state.channel.write_raw(
+                state.dma_request,
+                buf,
+                state.odr_byte_addr,
+                TransferOptions::default(),
+            )
         };
 
         // SAFETY: Transfer<'a> contains Channel<'a> which is just a u8 +
@@ -199,9 +203,12 @@ impl IsrCore {
         let (ptr, len) = state.bcm.current_plane();
         let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
         let transfer = unsafe {
-            state
-                .channel
-                .write_raw(state.dma_request, buf, state.odr_byte_addr, TransferOptions::default())
+            state.channel.write_raw(
+                state.dma_request,
+                buf,
+                state.odr_byte_addr,
+                TransferOptions::default(),
+            )
         };
         state.transfer =
             Some(unsafe { core::mem::transmute::<Transfer<'_>, Transfer<'static>>(transfer) });
@@ -214,7 +221,7 @@ impl IsrCore {
 
 /// HUB75 LED matrix controller driven by an ISR-based BCM refresh loop.
 ///
-/// Created via the [`hub75_define!`] macro's generated `init()` function.
+/// Created via the `hub75_define!` macro's generated `init()` function.
 /// The timer type `T` is baked in by the macro; the framebuffer type `FB`
 /// is locked in at construction time.
 ///
@@ -276,8 +283,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         timer.set_autoreload_preload(true);
 
         let max: u32 = timer.get_max_compare_value().into();
-        timer
-            .set_compare_value(TimChannel::Ch1, (max * 4 / 5).try_into().ok().unwrap());
+        timer.set_compare_value(TimChannel::Ch1, (max * 4 / 5).try_into().ok().unwrap());
 
         timer.enable_channel(TimChannel::Ch1, true);
         timer.generate_update_event();
@@ -349,10 +355,6 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         Ok(unsafe { &mut *(old_ptr as *mut FB) })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Slim hub75_define! macro
-// ---------------------------------------------------------------------------
 
 /// Define a HUB75 driver instance with its own timer static and ISR handler.
 ///

@@ -8,13 +8,13 @@
 //! This library uses an ISR-driven DMA refresh loop to continuously output
 //! framebuffer data to a GPIO port. A timer generates the pixel clock via PWM
 //! and triggers DMA byte-transfers on each update event. Once the driver is
-//! initialised via [`hub75_define!`]'s `init()` function, rendering happens
+//! initialised via `hub75_define!`'s `init()` function, rendering happens
 //! entirely in the background via DMA transfer-complete interrupts — no CPU
 //! involvement per pixel.
 //!
 //! ## Double Buffering
 //!
-//! The driver supports double-buffered operation via [`Hub75::swap()`]. The
+//! The driver supports double-buffered operation via `Hub75::swap()`. The
 //! application writes to one framebuffer while the ISR renders from another,
 //! swapping atomically at frame boundaries.
 //!
@@ -38,7 +38,7 @@
 //!
 //! ## Defining an Instance
 //!
-//! Use the [`hub75_define!`] macro to create a driver module bound to specific
+//! Use the `hub75_define!` macro to create a driver module bound to specific
 //! timer and DMA channel peripherals:
 //!
 //! ```ignore
@@ -86,6 +86,7 @@ pub mod __macro_support {
 
 use embassy_stm32::gpio::{AnyPin, Pin};
 
+// re-export items from embassy-stm32 that are used in the public API
 pub use embassy_stm32::gpio::Speed;
 pub use embassy_stm32::time::Hertz;
 
@@ -182,8 +183,7 @@ impl Hub75Pins8 {
         latch: AnyPin,
         blank: AnyPin,
     ) -> Result<Self, Hub75Error> {
-        let pins_ref: [&AnyPin; 8] =
-            [&red1, &grn1, &blu1, &red2, &grn2, &blu2, &latch, &blank];
+        let pins_ref: [&AnyPin; 8] = [&red1, &grn1, &blu1, &red2, &grn2, &blu2, &latch, &blank];
 
         let port = pins_ref[0].port();
         let first = pins_ref[0].pin();

@@ -412,11 +412,8 @@ dependencies = [
 name = "embassy-stm32-hub75"
 version = "0.1.0"
 dependencies = [
- "cfg-if",
- "cortex-m",
  "critical-section",
  "defmt 1.1.0",
- "embassy-executor",
  "embassy-stm32",
  "embedded-graphics",
  "hub75-framebuffer",
@@ -1040,6 +1037,7 @@ dependencies = [
 name = "stm32f722-examples"
 version = "0.1.0"
 dependencies = [
+ "cortex-m",
  "cortex-m-rt",
  "defmt 1.1.0",
  "defmt-rtt",

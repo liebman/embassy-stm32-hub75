@@ -53,7 +53,11 @@ const PLANES: usize = 1;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
-hub75_define!(hub75, embassy_stm32::peripherals::TIM2, embassy_stm32::peripherals::DMA1_CH1);
+hub75_define!(
+    hub75,
+    embassy_stm32::peripherals::TIM2,
+    embassy_stm32::peripherals::DMA1_CH1
+);
 
 bind_interrupts!(struct Irqs {
     DMA1_CHANNEL1 =>
@@ -113,7 +117,11 @@ async fn main(_spawner: Spawner) {
 
     info!("Starting ISR-driven rendering");
     let hub75 = hub75::init(
-        p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins,
+        p.TIM2,
+        p.PA0,
+        p.DMA1_CH1,
+        Irqs,
+        pins,
         Config::new().frequency(Hertz(6_000_000)),
         fb0,
     );
