@@ -53,7 +53,11 @@
 //!         hub75::Hub75DmaHandler;
 //! });
 //!
-//! let hub75 = hub75::init(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000), fb);
+//! let hub75 = hub75::init(
+//!     p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins,
+//!     Config::new().frequency(Hertz(6_000_000)),
+//!     fb,
+//! );
 //! ```
 //!
 //! ## Crate Features
@@ -82,7 +86,45 @@ pub mod __macro_support {
 
 use embassy_stm32::gpio::{AnyPin, Pin};
 
+pub use embassy_stm32::gpio::Speed;
 pub use embassy_stm32::time::Hertz;
+
+/// Driver configuration for pixel clock frequency (defaults to 20 MHz) and GPIO output speed (defaults to Medium).
+#[non_exhaustive]
+pub struct Config {
+    /// Pixel clock frequency for the HUB75 panel.
+    pub frequency: Hertz,
+    /// GPIO output speed for the data and control pins.
+    pub gpio_speed: Speed,
+}
+
+impl Config {
+    /// Sensible starting defaults: 10 MHz pixel clock, medium GPIO speed.
+    pub const fn new() -> Self {
+        Self {
+            frequency: Hertz(10_000_000),
+            gpio_speed: Speed::Medium,
+        }
+    }
+
+    /// Set the pixel clock frequency.
+    pub const fn frequency(mut self, frequency: Hertz) -> Self {
+        self.frequency = frequency;
+        self
+    }
+
+    /// Set the GPIO output speed for the data and control pins.
+    pub const fn gpio_speed(mut self, gpio_speed: Speed) -> Self {
+        self.gpio_speed = gpio_speed;
+        self
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Pin configuration for a HUB75 panel with an external address latch.
 ///

@@ -712,6 +712,7 @@ dependencies = [
 [[package]]
 name = "hub75-framebuffer"
 version = "0.8.0"
+source = "git+https://github.com/liebman/hub75-framebuffer?branch=main#1a900fc1360d9537ad4835702891858d64f3ebbd"
 dependencies = [
  "bitfield 0.19.4",
  "defmt 1.1.0",
@@ -1036,7 +1037,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "stm32wl55-examples"
+name = "stm32f722-examples"
 version = "0.1.0"
 dependencies = [
  "cortex-m-rt",

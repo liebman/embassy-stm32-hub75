@@ -1,5 +1,5 @@
 [package]
-name = "stm32wl55-examples"
+name = "stm32f722-examples"
 description = "Examples for the embassy-stm32-hub75 crate"
 repository = "https://github.com/liebman/embassy-stm32-hub75"
 edition = "2021"
@@ -40,4 +40,4 @@ heapless = "0.9.3"
 
 
 [patch.crates-io]
-hub75-framebuffer = { path = "../../../hub75-framebuffer" }
+hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer", branch = "main" }

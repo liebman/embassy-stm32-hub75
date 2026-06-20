@@ -16,10 +16,8 @@ use core::task::{Poll, Waker};
 
 use critical_section::Mutex;
 use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
-use embassy_stm32::gpio::{OutputType, Pin};
+use embassy_stm32::gpio::{Flex, Level, OutputType};
 use embassy_stm32::interrupt::typelevel::Binding;
-use embassy_stm32::pac;
-use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
 use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
@@ -27,7 +25,7 @@ use embassy_stm32::Peri;
 
 use crate::bcm::{planes_from_fb, BcmState, PlaneInfo};
 use crate::framebuffer::FrameBuffer;
-use crate::{Hub75Error, Hub75Pins8};
+use crate::{Config, Hub75Error, Hub75Pins8};
 
 // ---------------------------------------------------------------------------
 // Timer slot type alias (used by macro and Hub75::new)
@@ -36,23 +34,6 @@ use crate::{Hub75Error, Hub75Pins8};
 /// Type alias for the timer static slot used by [`hub75_define!`].
 #[doc(hidden)]
 pub type TimerSlot<T> = Mutex<RefCell<Option<ManuallyDrop<Timer<'static, T>>>>>;
-
-// ---------------------------------------------------------------------------
-// GPIO speed selection
-// ---------------------------------------------------------------------------
-
-fn gpio_speed_for_freq(freq: Hertz) -> pac::gpio::vals::Ospeedr {
-    let f = freq.0;
-    if f <= 2_000_000 {
-        pac::gpio::vals::Ospeedr::LOW_SPEED
-    } else if f <= 10_000_000 {
-        pac::gpio::vals::Ospeedr::MEDIUM_SPEED
-    } else if f <= 50_000_000 {
-        pac::gpio::vals::Ospeedr::HIGH_SPEED
-    } else {
-        pac::gpio::vals::Ospeedr::VERY_HIGH_SPEED
-    }
-}
 
 // ---------------------------------------------------------------------------
 // IsrCore — type-erased ISR state (library code, no generics)
@@ -263,34 +244,31 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         dma_ch: Peri<'d, D>,
         dma_irq: impl Binding<D::Interrupt, dma::InterruptHandler<D>> + 'd,
         pins: Hub75Pins8,
-        frequency: Hertz,
+        config: Config,
         fb: &'static mut FB,
         core: &'static IsrCore,
         timer_slot: &'static TimerSlot<T>,
     ) -> Self {
         let gpio = pins.pins[0].block();
-        let speed = gpio_speed_for_freq(frequency);
-
-        for pin in &pins.pins {
-            let n = pin.pin() as usize;
-            gpio.moder()
-                .modify(|w| w.set_moder(n, pac::gpio::vals::Moder::OUTPUT));
-            gpio.ospeedr().modify(|w| w.set_ospeedr(n, speed));
-            gpio.otyper()
-                .modify(|w| w.set_ot(n, pac::gpio::vals::Ot::PUSH_PULL));
-        }
-
-        gpio.bsrr()
-            .write(|w| w.set_bs(pins.blank_pin_num(), true));
-
         let byte_offset: usize = if pins.base_pin == 0 { 0 } else { 1 };
         let odr_byte_addr = unsafe { (gpio.odr().as_ptr() as *mut u8).add(byte_offset) };
+
+        for (i, pin) in pins.pins.into_iter().enumerate() {
+            // SAFETY: we own the AnyPin and will leak the Flex to keep it alive.
+            let peri = unsafe { Peri::new_unchecked(pin) };
+            let mut flex = Flex::new(peri);
+            if i == 7 {
+                flex.set_level(Level::High);
+            }
+            flex.set_as_output(config.gpio_speed);
+            core::mem::forget(flex);
+        }
 
         let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
 
         let timer = Timer::new(tim);
         timer.set_counting_mode(CountingMode::EdgeAlignedUp);
-        timer.set_frequency(frequency, RoundTo::Slower);
+        timer.set_frequency(config.frequency, RoundTo::Slower);
         timer.enable_outputs();
 
         timer.set_output_compare_mode(TimChannel::Ch1, OutputCompareMode::PwmMode2);
@@ -404,7 +382,11 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
 ///         hub75::Hub75DmaHandler;
 /// });
 ///
-/// let hub75 = hub75::init(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000), fb0);
+/// let hub75 = hub75::init(
+///     p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins,
+///     Config::new().frequency(Hertz(6_000_000)),
+///     fb0,
+/// );
 /// ```
 #[macro_export]
 macro_rules! hub75_define {
@@ -460,14 +442,14 @@ macro_rules! hub75_define {
                         Hub75DmaHandler,
                     > + 'd,
                 pins: $crate::Hub75Pins8,
-                frequency: $crate::Hertz,
+                config: $crate::Config,
                 fb: &'static mut FB,
             ) -> Hub75<'d, FB>
             where
                 $dma_ch: UpDma<$timer>,
             {
                 let hub75 = latched::Hub75::new(
-                    tim, clock_pin, dma_ch, dma_irq, pins, frequency, fb,
+                    tim, clock_pin, dma_ch, dma_irq, pins, config, fb,
                     &CORE, &TIMER,
                 );
                 critical_section::with(|cs| {

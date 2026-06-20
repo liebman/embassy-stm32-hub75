@@ -28,8 +28,8 @@ alignment.
 - **Multiple instances** -- the `hub75_define!` macro stamps out independent
   per-instance state, so multiple panels can run simultaneously on different
   timer/DMA pairs
-- **Automatic GPIO speed selection** -- pin output speed is automatically
-  matched to the requested pixel clock frequency
+- **Configurable clock and GPIO speed** -- pixel clock frequency and GPIO
+  output speed are set explicitly via [`Config`](src/lib.rs)
 - **BCM grayscale** -- configurable bit depth (1-8 planes) via the
   `hub75-framebuffer` crate
 
@@ -55,7 +55,7 @@ The required latch circuit schematic and explanation can be found in the
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
-use embassy_stm32_hub75::{hub75_define, Color, Hertz, Hub75Pins8};
+use embassy_stm32_hub75::{hub75_define, Color, Config, Hertz, Hub75Pins8};
 use static_cell::StaticCell;
 
 const ROWS: usize = 64;
@@ -92,7 +92,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let fb1 = FB1.init(FBType::new());
 
     // 4. Initialize and start rendering
-    let hub75 = hub75::init(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000), fb0);
+    let hub75 = hub75::init(
+        p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins,
+        Config::new().frequency(Hertz(6_000_000)),
+        fb0,
+    );
 
     // 5. Double-buffered loop
     let mut write_fb = fb1;
@@ -129,6 +133,9 @@ Working examples are provided for two targets:
 - **STM32WL55** (`examples/stm32wl55/`) -- 64x64 panel at 6 MHz pixel clock
 - **STM32F722** (`examples/stm32f722/`) -- 64x64 panel at 20 MHz pixel clock,
   includes a multi-task latched example with FPS counters
+
+Each example overrides `Config::frequency` for its target while using the
+default `Speed::Medium` GPIO output speed.
 
 Build an example:
 

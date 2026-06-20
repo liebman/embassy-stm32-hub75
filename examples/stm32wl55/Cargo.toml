@@ -38,5 +38,5 @@ static_cell = "2.1.1"
 numtoa = "1.0.0"
 
 
-# [patch.crates-io]
-# hub75-framebuffer = { path = "../../../hub75-framebuffer" }
+[patch.crates-io]
+hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer", branch = "main" }

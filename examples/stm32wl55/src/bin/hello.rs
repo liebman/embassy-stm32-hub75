@@ -42,7 +42,7 @@ use static_cell::StaticCell;
 
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
-use embassy_stm32_hub75::{hub75_define, Color, Hertz, Hub75Pins8};
+use embassy_stm32_hub75::{hub75_define, Color, Config, Hertz, Hub75Pins8};
 
 use numtoa::NumToA;
 
@@ -112,7 +112,11 @@ async fn main(_spawner: Spawner) {
         .build();
 
     info!("Starting ISR-driven rendering");
-    let hub75 = hub75::init(p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins, Hertz(6_000_000), fb0);
+    let hub75 = hub75::init(
+        p.TIM2, p.PA0, p.DMA1_CH1, Irqs, pins,
+        Config::new().frequency(Hertz(6_000_000)),
+        fb0,
+    );
     info!("Hub75 started");
     // Double-buffered loop: draw into fb1, swap, repeat.
     let mut write_fb: &'static mut FBType = fb1;
