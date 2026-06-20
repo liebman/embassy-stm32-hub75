@@ -19,7 +19,7 @@ debug = true  # Symbols are nice and they don't increase the size on Flash
 opt-level = 2
 
 [dependencies]
-embassy-stm32-hub75 = { path = "../../", features = ["stm32wl55", "defmt"] }
+embassy-stm32-hub75 = { path = "../../", features = ["defmt"] }
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 defmt-rtt = "1.1.0"
