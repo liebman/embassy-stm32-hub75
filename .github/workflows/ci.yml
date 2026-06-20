@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '0 0 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,11 +40,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.example }}
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --locked -- -D warnings
         working-directory: ${{ matrix.example }}
 
-  build:
-    name: Build (${{ matrix.example }})
+  build-locked:
+    name: Build Locked (${{ matrix.example }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -55,5 +57,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.example }}
+      - run: cargo build --locked
+        working-directory: ${{ matrix.example }}
+
+  build-latest-deps:
+    name: Build Latest Deps (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        example: [examples/stm32f722, examples/stm32wl55]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.example }}
+      - run: cargo update
+        working-directory: ${{ matrix.example }}
       - run: cargo build
         working-directory: ${{ matrix.example }}
