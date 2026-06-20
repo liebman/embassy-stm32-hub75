@@ -42,7 +42,3 @@ panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 static_cell = "2.1.1"
 numtoa = "1.0.0"
 heapless = "0.9.3"
-
-
-[patch.crates-io]
-hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer", branch = "main" }
