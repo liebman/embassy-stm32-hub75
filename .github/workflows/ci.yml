@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - run: cargo fmt --check
+        working-directory: examples/stm32f722
+      - run: cargo fmt --check
+        working-directory: examples/stm32wl55
+
+  clippy:
+    name: Clippy (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        example: [examples/stm32f722, examples/stm32wl55]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.example }}
+      - run: cargo clippy -- -D warnings
+        working-directory: ${{ matrix.example }}
+
+  build:
+    name: Build (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        example: [examples/stm32f722, examples/stm32wl55]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.example }}
+      - run: cargo build
+        working-directory: ${{ matrix.example }}

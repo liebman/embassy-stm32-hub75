@@ -19,7 +19,8 @@ debug = true  # Symbols are nice and they don't increase the size on Flash
 opt-level = 2
 
 [dependencies]
-embassy-stm32-hub75 = { path = "../../", features = ["stm32wl55", "defmt"] }
+embassy-stm32-hub75 = { path = "../../", features = ["defmt"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 defmt-rtt = "1.1.0"
 defmt = "1.1.0"
@@ -29,7 +30,10 @@ embassy-stm32 = { version = "0.6.0", features = [
     "unstable-pac",
     "stm32wl55jc-cm4",
 ] }
-embassy-executor = { version = "0.10.0" }
+embassy-executor = { version = "0.10.0", features = [
+    "platform-cortex-m",
+    "executor-thread",
+] }
 embedded-graphics = "0.8.2"
 hub75-framebuffer = { version = "0.8.0", features = ["defmt"] }
 embassy-time = "0.5.1"

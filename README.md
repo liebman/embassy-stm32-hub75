@@ -144,15 +144,6 @@ cd examples/stm32f722
 cargo build --bin hello
 ```
 
-## Dependencies
-
-- [`embassy-stm32`](https://crates.io/crates/embassy-stm32) -- HAL and
-  timer/DMA drivers
-- [`hub75-framebuffer`](https://crates.io/crates/hub75-framebuffer) -- bitplane
-  framebuffer with `embedded-graphics` support
-- [`critical-section`](https://crates.io/crates/critical-section) -- ISR-safe
-  shared state
-
 ## License
 
 Licensed under either of

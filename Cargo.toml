@@ -25,8 +25,6 @@ debug = true  # Symbols are nice and they don't increase the size on Flash
 opt-level = 2
 
 [dependencies]
-cfg-if = "1.0.4"
-cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 critical-section = "1.2"
 defmt = { version = "1.0.1", optional = true }
 embedded-graphics = "0.8.2"
@@ -34,27 +32,6 @@ embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
 hub75-framebuffer = "0.8.0"
-embassy-executor = { version = "0.10.0", features = [
-    "platform-cortex-m",
-    "executor-interrupt",
-    "executor-thread",
-] }
-
-[dev-dependencies]
-cortex-m-rt = "0.7"
-defmt-rtt = "1.1.0"
-defmt = "1.0.1"
-embassy-stm32 = { version = "0.6.0", default-features = false, features = [
-    "rt",
-    "time-driver-tim1",
-    "memory-x",
-    "unstable-pac",
-] }
-embassy-executor = { version = "0.10.0" }
-hub75-framebuffer = { version = "0.8.0", features = ["defmt"] }
-embassy-time = "0.5.1"
-panic-probe = { version = "1.0.0", features = ["print-defmt"] }
-static_cell = "2.1.1"
 
 [features]
 default = []
@@ -64,16 +41,10 @@ defmt = [
     "hub75-framebuffer/defmt",
     "embedded-graphics/defmt",
 ]
-stm32wl55 = ["embassy-stm32/stm32wl55jc-cm4"]
+
+# only used for documentation!
 stm32f722 = ["embassy-stm32/stm32f722ze"]
 
 [package.metadata.docs.rs]
-features = ["stm32wl55"]
+features = ["stm32f722"]
 targets = ["thumbv7em-none-eabi"]
-
-# [patch.crates-io]
-# hub75-framebuffer = { path = "../hub75-framebuffer" }
-
-# embassy-stm32 = { path = "../embassy/embassy-stm32" }
-# embassy-executor = { path = "../embassy/embassy-executor" }
-# embassy-time = { path = "../embassy/embassy-time" }

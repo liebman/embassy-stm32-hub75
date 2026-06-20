@@ -24,7 +24,10 @@ use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::rcc::{AHBPrescaler, APBPrescaler, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllRDiv, PllSource, Sysclk};
+use embassy_stm32::rcc::{
+    AHBPrescaler, APBPrescaler, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllRDiv, PllSource,
+    Sysclk,
+};
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::Timer;
 use embassy_time::{Duration, Instant};
@@ -55,7 +58,11 @@ const NBARS: i32 = ROWS as i32 / 8;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
-hub75_define!(hub75, embassy_stm32::peripherals::TIM1, embassy_stm32::peripherals::DMA2_CH5);
+hub75_define!(
+    hub75,
+    embassy_stm32::peripherals::TIM1,
+    embassy_stm32::peripherals::DMA2_CH5
+);
 
 bind_interrupts!(struct Irqs {
     DMA2_STREAM5 =>
@@ -199,7 +206,11 @@ async fn main(spawner: Spawner) {
 
     info!("Starting ISR-driven rendering");
     let hub75 = hub75::init(
-        p.TIM1, p.PE9, p.DMA2_CH5, Irqs, pins,
+        p.TIM1,
+        p.PE9,
+        p.DMA2_CH5,
+        Irqs,
+        pins,
         Config::new().frequency(Hertz(20_000_000)),
         fb0,
     );
