@@ -43,6 +43,8 @@ pub struct BcmState {
 }
 
 impl BcmState {
+    #[must_use]
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             planes: [(null::<u8>(), 0usize); MAX_PLANES],
@@ -78,7 +80,8 @@ impl BcmState {
         false
     }
 
-    /// Returns the (pointer, byte_length) for the current plane's DMA data.
+    /// Returns the (`pointer`, `byte_length`) for the current plane's DMA data.
+    #[must_use]
     pub fn current_plane(&self) -> (*const u8, usize) {
         self.planes[self.current_plane]
     }

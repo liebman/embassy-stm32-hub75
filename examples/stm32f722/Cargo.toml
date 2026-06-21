@@ -27,7 +27,6 @@ defmt = "1.1.0"
 embassy-stm32 = { version = "0.6.0", features = [
     "time-driver-tim2",
     "memory-x",
-    "unstable-pac",
     "stm32f722ze",
 ] }
 embassy-executor = { version = "0.10.0", features = [
