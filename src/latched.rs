@@ -66,6 +66,8 @@ unsafe impl Sync for IsrCore {}
 
 impl IsrCore {
     /// Create a new uninitialized core. For use in `static` declarations.
+    #[must_use]
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             state: Mutex::new(RefCell::new(None)),
@@ -84,10 +86,7 @@ impl IsrCore {
     /// transfer-complete ISR.
     pub fn on_dma_complete(&self, cs: critical_section::CriticalSection) {
         let mut borrow = self.state.borrow_ref_mut(cs);
-        let state = match borrow.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
+        let Some(state) = borrow.as_mut() else { return };
 
         if let Some(transfer) = state.transfer.take() {
             drop(transfer);
@@ -134,20 +133,23 @@ impl IsrCore {
     /// Returns the raw pointer to the old framebuffer.
     ///
     /// # Safety
-    /// `new_fb_ptr` must point to a valid `&'static mut FB` that was previously
-    /// passed to `init` or a prior `swap`.
+    /// `new_fb_ptr` must point to a valid `&'static mut FB`
+    ///
+    /// # Errors
+    /// Returns `Hub75Error::NotInitialised` if the driver state has not been set up.
     pub async unsafe fn swap_inner(
         &self,
         new_planes: PlaneInfo,
         new_fb_ptr: *const (),
-    ) -> *const () {
+    ) -> Result<*const (), Hub75Error> {
         critical_section::with(|cs| {
             let mut borrow = self.state.borrow_ref_mut(cs);
-            let state = borrow.as_mut().expect("Hub75 not initialised");
+            let state = borrow.as_mut().ok_or(Hub75Error::NotInitialised)?;
             state.pending_planes = Some(new_planes);
             state.pending_fb_ptr = new_fb_ptr;
             self.swap_done.store(false, Ordering::Relaxed);
-        });
+            Ok(())
+        })?;
 
         poll_fn(|cx| {
             if self.swap_done.load(Ordering::Acquire) {
@@ -165,8 +167,8 @@ impl IsrCore {
 
         critical_section::with(|cs| {
             let borrow = self.state.borrow_ref(cs);
-            let state = borrow.as_ref().expect("Hub75 not initialised");
-            state.returned_fb_ptr
+            let state = borrow.as_ref().ok_or(Hub75Error::NotInitialised)?;
+            Ok(state.returned_fb_ptr)
         })
     }
 
@@ -189,6 +191,7 @@ impl IsrCore {
         fb_ptr: *const (),
     ) {
         let mut borrow = self.state.borrow_ref_mut(cs);
+        // this can't happen because this is only called from Hub75::new and the state is initialised there
         let state = borrow.as_mut().expect("Hub75 not initialised");
 
         state.bcm.reset_with_planes(planes, plane_count);
@@ -238,13 +241,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     ///
     /// This is called by the macro-generated `init()` wrapper. It configures
     /// GPIO pins, timer, and DMA, stores the timer into `timer_slot`, kicks
-    /// the first DMA transfer, but does **not** start the timer — the caller
-    /// (macro `init()`) does that after this returns.
-    ///
-    /// # Safety contract for callers
-    /// The caller must call `timer_slot.borrow_ref().as_ref().unwrap().start()`
-    /// inside a critical section immediately after this returns.
+    /// the first DMA transfer, and starts the timer.
     #[doc(hidden)]
+    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new<D: UpDma<T> + ChannelInstance>(
         tim: Peri<'d, T>,
         clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
@@ -257,8 +257,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         timer_slot: &'static TimerSlot<T>,
     ) -> Self {
         let gpio = pins.pins[0].block();
-        let byte_offset: usize = if pins.base_pin == 0 { 0 } else { 1 };
-        let odr_byte_addr = unsafe { (gpio.odr().as_ptr() as *mut u8).add(byte_offset) };
+        let byte_offset = usize::from(pins.base_pin != 0);
+        let odr_byte_addr = unsafe { (gpio.odr().as_ptr().cast::<u8>()).add(byte_offset) };
 
         for (i, pin) in pins.pins.into_iter().enumerate() {
             // SAFETY: we own the AnyPin and will leak the Flex to keep it alive.
@@ -293,7 +293,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         let channel = Channel::new(dma_ch, dma_irq);
 
         let (planes, plane_count) = planes_from_fb(fb);
-        let fb_ptr = fb as *const FB as *const ();
+        let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
 
         critical_section::with(|cs| {
             // SAFETY: Timer<'d> → Timer<'static>. The peripheral is consumed by
@@ -324,6 +324,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
             );
 
             core.start_first_transfer(cs, planes, plane_count, fb_ptr);
+
+            timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
 
         Self {
@@ -334,6 +336,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     }
 
     /// Returns the number of complete BCM frames rendered since init.
+    #[must_use]
     pub fn frame_count(&self) -> u32 {
         self.core.frame_count()
     }
@@ -344,11 +347,14 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     /// frame boundary, at which point plane pointers are swapped atomically.
     /// Returns an exclusive reference to the old framebuffer that is no longer
     /// being read by the ISR.
+    ///
+    /// # Errors
+    /// Returns `Hub75Error::NotInitialised` if the driver has not been initialised.
     pub async fn swap(&self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
         let (new_planes, _) = planes_from_fb(new_fb);
-        let fb_ptr = new_fb as *const FB as *const ();
+        let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
         // SAFETY: fb_ptr originated from a valid &'static mut FB.
-        let old_ptr = unsafe { self.core.swap_inner(new_planes, fb_ptr).await };
+        let old_ptr = unsafe { self.core.swap_inner(new_planes, fb_ptr).await? };
         // SAFETY: The ISR atomically swapped away from this buffer at the frame
         // boundary — it is no longer being read. The pointer originated from a
         // `&'static mut FB` passed to a previous init or swap call.
@@ -450,14 +456,10 @@ macro_rules! hub75_define {
             where
                 $dma_ch: UpDma<$timer>,
             {
-                let hub75 = latched::Hub75::new(
+                latched::Hub75::new(
                     tim, clock_pin, dma_ch, dma_irq, pins, config, fb,
                     &CORE, &TIMER,
-                );
-                critical_section::with(|cs| {
-                    TIMER.borrow_ref(cs).as_ref().unwrap().start();
-                });
-                hub75
+                )
             }
         }
     };

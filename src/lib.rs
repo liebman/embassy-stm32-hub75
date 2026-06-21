@@ -67,6 +67,8 @@
 
 #![no_std]
 #![warn(missing_docs)]
+#![warn(clippy::all)]
+#![warn(clippy::pedantic)]
 
 pub use hub75_framebuffer as framebuffer;
 
@@ -92,6 +94,7 @@ pub use embassy_stm32::time::Hertz;
 
 /// Driver configuration for pixel clock frequency (defaults to 20 MHz) and GPIO output speed (defaults to Medium).
 #[non_exhaustive]
+#[derive(Copy, Clone)]
 pub struct Config {
     /// Pixel clock frequency for the HUB75 panel.
     pub frequency: Hertz,
@@ -101,6 +104,7 @@ pub struct Config {
 
 impl Config {
     /// Sensible starting defaults: 10 MHz pixel clock, medium GPIO speed.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             frequency: Hertz(10_000_000),
@@ -109,12 +113,14 @@ impl Config {
     }
 
     /// Set the pixel clock frequency.
+    #[must_use]
     pub const fn frequency(mut self, frequency: Hertz) -> Self {
         self.frequency = frequency;
         self
     }
 
     /// Set the GPIO output speed for the data and control pins.
+    #[must_use]
     pub const fn gpio_speed(mut self, gpio_speed: Speed) -> Self {
         self.gpio_speed = gpio_speed;
         self
@@ -197,13 +203,15 @@ impl Hub75Pins8 {
         }
 
         for (i, pin) in pins_ref.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let i = i as u8;
             if pin.port() != port {
-                return Err(Hub75Error::PinNotOnSamePort { index: i as u8 });
+                return Err(Hub75Error::PinNotOnSamePort { index: i });
             }
-            let expected = first + i as u8;
+            let expected = first + i;
             if pin.pin() != expected {
                 return Err(Hub75Error::PinsNotConsecutive {
-                    index: i as u8,
+                    index: i,
                     expected,
                     actual: pin.pin(),
                 });
@@ -217,6 +225,7 @@ impl Hub75Pins8 {
     }
 
     /// The BLANK pin (index 7 in the group).
+    #[must_use]
     pub fn blank_pin_num(&self) -> usize {
         (self.base_pin + 7) as usize
     }
@@ -245,4 +254,6 @@ pub enum Hub75Error {
     Dma,
     /// Error occurred during timer configuration.
     Timer,
+    /// The driver has not been initialised yet.
+    NotInitialised,
 }
