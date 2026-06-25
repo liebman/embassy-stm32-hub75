@@ -70,6 +70,7 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+use embassy_stm32::Peri;
 pub use hub75_framebuffer as framebuffer;
 
 /// The color type used by the HUB75 driver.
@@ -86,7 +87,7 @@ pub mod __macro_support {
     pub use embassy_stm32;
 }
 
-use embassy_stm32::gpio::{AnyPin, Pin};
+use embassy_stm32::gpio::{AnyPin, Flex, Level, Pin};
 
 // re-export items from embassy-stm32 that are used in the public API
 pub use embassy_stm32::gpio::Speed;
@@ -131,6 +132,14 @@ impl Default for Config {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Trait for configuring and getting the ODR pointer for a HUB75 panel.
+pub trait Hub75Pins {
+    /// The word type for the GPIO port (u8 for 8-bit ports, u16 for 16-bit ports)
+    type Word;
+    /// Configure the pins and get the ODR pointer. Returns a pointer to a u8 and will need casting for u16.
+    fn configure_and_get_odr(self, speed: Speed) -> *mut u8;
 }
 
 /// Pin configuration for a HUB75 panel with an external address latch.
@@ -223,11 +232,26 @@ impl Hub75Pins8 {
             base_pin: first,
         })
     }
+}
 
-    /// The BLANK pin (index 7 in the group).
-    #[must_use]
-    pub fn blank_pin_num(&self) -> usize {
-        (self.base_pin + 7) as usize
+impl Hub75Pins for Hub75Pins8 {
+    type Word = u8;
+    fn configure_and_get_odr(self, speed: Speed) -> *mut u8 {
+        let gpio = self.pins[0].block();
+        let byte_offset = usize::from(self.base_pin != 0);
+        let odr_byte_addr = unsafe { (gpio.odr().as_ptr().cast::<u8>()).add(byte_offset) };
+
+        for (i, pin) in self.pins.into_iter().enumerate() {
+            // SAFETY: we own the AnyPin and will leak the Flex to keep it alive.
+            let peri = unsafe { Peri::new_unchecked(pin) };
+            let mut flex = Flex::new(peri);
+            if i == 7 {
+                flex.set_level(Level::High);
+            }
+            flex.set_as_output(speed);
+            core::mem::forget(flex);
+        }
+        odr_byte_addr
     }
 }
 

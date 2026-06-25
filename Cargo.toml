@@ -48,3 +48,8 @@ stm32f722 = ["embassy-stm32/stm32f722ze"]
 [package.metadata.docs.rs]
 features = ["stm32f722"]
 targets = ["thumbv7em-none-eabi"]
+
+
+[patch.crates-io]
+
+hub75-framebuffer = { path = "../hub75-framebuffer" }

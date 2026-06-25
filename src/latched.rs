@@ -16,7 +16,7 @@ use core::task::{Poll, Waker};
 
 use critical_section::Mutex;
 use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
-use embassy_stm32::gpio::{Flex, Level, OutputType};
+use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
@@ -25,7 +25,7 @@ use embassy_stm32::Peri;
 
 use crate::bcm::{planes_from_fb, BcmState, PlaneInfo};
 use crate::framebuffer::FrameBuffer;
-use crate::{Config, Hub75Error, Hub75Pins8};
+use crate::{Config, Hub75Error, Hub75Pins};
 
 // ---------------------------------------------------------------------------
 // Timer slot type alias (used by macro and Hub75::new)
@@ -245,31 +245,22 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     #[doc(hidden)]
     #[allow(clippy::needless_pass_by_value)]
     #[allow(clippy::too_many_arguments)]
-    pub fn new<D: UpDma<T> + ChannelInstance>(
+    pub fn new<D: UpDma<T> + ChannelInstance, P:Hub75Pins>(
         tim: Peri<'d, T>,
         clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
         dma_ch: Peri<'d, D>,
         dma_irq: impl Binding<D::Interrupt, dma::InterruptHandler<D>> + 'd,
-        pins: Hub75Pins8,
+        pins: P,
         config: Config,
         fb: &'static mut FB,
         core: &'static IsrCore,
         timer_slot: &'static TimerSlot<T>,
-    ) -> Self {
-        let gpio = pins.pins[0].block();
-        let byte_offset = usize::from(pins.base_pin != 0);
-        let odr_byte_addr = unsafe { (gpio.odr().as_ptr().cast::<u8>()).add(byte_offset) };
-
-        for (i, pin) in pins.pins.into_iter().enumerate() {
-            // SAFETY: we own the AnyPin and will leak the Flex to keep it alive.
-            let peri = unsafe { Peri::new_unchecked(pin) };
-            let mut flex = Flex::new(peri);
-            if i == 7 {
-                flex.set_level(Level::High);
-            }
-            flex.set_as_output(config.gpio_speed);
-            core::mem::forget(flex);
-        }
+    ) -> Self 
+    where 
+        // insure the framebuffer wordsize matches the pins we are passing at compile time
+        FB: FrameBuffer<Word = P::Word>,
+    {
+        let odr_byte_addr = pins.configure_and_get_odr(config.gpio_speed);
 
         let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
 
@@ -314,7 +305,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
                     channel,
                     transfer: None,
                     dma_request,
-                    odr_byte_addr,
+                    odr_byte_addr: odr_byte_addr.cast::<u8>(),
                     bcm: BcmState::new(),
                     current_fb_ptr: core::ptr::null(),
                     pending_planes: None,
@@ -438,7 +429,7 @@ macro_rules! hub75_define {
 
             /// Initialize the HUB75 driver, configure hardware, and start
             /// rendering from the provided framebuffer.
-            pub fn init<'d, FB: FrameBuffer>(
+            pub fn init<'d, P: $crate::Hub75Pins, FB: FrameBuffer>(
                 tim: Peri<'d, $timer>,
                 clock_pin: Peri<'d, impl TimerPin<$timer, Ch1>>,
                 dma_ch: Peri<'d, $dma_ch>,
@@ -449,12 +440,13 @@ macro_rules! hub75_define {
                         <$dma_ch as ChannelInstance>::Interrupt,
                         Hub75DmaHandler,
                     > + 'd,
-                pins: $crate::Hub75Pins8,
+                pins: P,
                 config: $crate::Config,
                 fb: &'static mut FB,
             ) -> Hub75<'d, FB>
             where
                 $dma_ch: UpDma<$timer>,
+                FB: FrameBuffer<Word = P::Word>,
             {
                 latched::Hub75::new(
                     tim, clock_pin, dma_ch, dma_irq, pins, config, fb,
