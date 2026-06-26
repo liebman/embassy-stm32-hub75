@@ -1,8 +1,11 @@
-//! ISR-driven HUB75 latched panel driver.
+//! ISR-driven HUB75 timer+DMA panel driver.
 //!
 //! Use the `hub75_define!` macro to create a per-instance module containing
 //! only the timer static, ISR handler, and a thin `init()` wrapper. All driver
 //! logic lives in library code ([`Hub75`], [`IsrCore`]) with full IDE support.
+//!
+//! Supports both 8-bit (byte-width) and 16-bit (half-word-width) GPIO port
+//! configurations via the [`Hub75Pins`](crate::Hub75Pins) trait.
 //!
 //! The ISR stops and resets the timer between planes for deterministic clock
 //! alignment, then delegates BCM/DMA work to [`IsrCore::on_dma_complete()`].
@@ -16,6 +19,7 @@ use core::task::{Poll, Waker};
 
 use critical_section::Mutex;
 use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
+use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
@@ -43,12 +47,41 @@ struct IsrCoreState {
     channel: Channel<'static>,
     transfer: Option<Transfer<'static>>,
     dma_request: dma::Request,
-    odr_byte_addr: *mut u8,
+    odr_addr: *mut u8,
+    word_size: WordSize,
     bcm: BcmState,
     current_fb_ptr: *const (),
     pending_planes: Option<PlaneInfo>,
     pending_fb_ptr: *const (),
     returned_fb_ptr: *const (),
+}
+
+/// Start a DMA transfer with the correct word width.
+///
+/// # Safety
+/// `ptr` and `len` must describe a valid buffer of `word_size`-width elements.
+/// `odr_addr` must point to the appropriate ODR byte/half-word.
+unsafe fn kick_dma(
+    channel: &mut Channel<'static>,
+    request: dma::Request,
+    ptr: *const u8,
+    len: usize,
+    odr_addr: *mut u8,
+    word_size: WordSize,
+) -> Transfer<'static> {
+    let transfer = match word_size {
+        WordSize::OneByte => {
+            let buf = core::ptr::slice_from_raw_parts(ptr, len);
+            channel.write_raw(request, buf, odr_addr, TransferOptions::default())
+        }
+        WordSize::TwoBytes => {
+            let elem_count = len / 2;
+            let buf = core::ptr::slice_from_raw_parts(ptr.cast::<u16>(), elem_count);
+            channel.write_raw(request, buf, odr_addr.cast::<u16>(), TransferOptions::default())
+        }
+        _ => unreachable!(),
+    };
+    core::mem::transmute::<Transfer<'_>, Transfer<'static>>(transfer)
 }
 
 /// Per-instance ISR core state, shared between the ISR handler and the
@@ -107,21 +140,19 @@ impl IsrCore {
         }
 
         let (ptr, len) = state.bcm.current_plane();
-        let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
-        let new_transfer = unsafe {
-            state.channel.write_raw(
-                state.dma_request,
-                buf,
-                state.odr_byte_addr,
-                TransferOptions::default(),
-            )
-        };
-
         // SAFETY: Transfer<'a> contains Channel<'a> which is just a u8 +
         // PhantomData. The channel it borrows lives in this same static,
         // so the referent outlives the reference.
-        state.transfer =
-            Some(unsafe { core::mem::transmute::<Transfer<'_>, Transfer<'static>>(new_transfer) });
+        state.transfer = Some(unsafe {
+            kick_dma(
+                &mut state.channel,
+                state.dma_request,
+                ptr,
+                len,
+                state.odr_addr,
+                state.word_size,
+            )
+        });
     }
 
     /// Returns the number of complete BCM frames rendered.
@@ -204,17 +235,16 @@ impl IsrCore {
         self.frame_count.store(0, Ordering::Relaxed);
 
         let (ptr, len) = state.bcm.current_plane();
-        let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
-        let transfer = unsafe {
-            state.channel.write_raw(
+        state.transfer = Some(unsafe {
+            kick_dma(
+                &mut state.channel,
                 state.dma_request,
-                buf,
-                state.odr_byte_addr,
-                TransferOptions::default(),
+                ptr,
+                len,
+                state.odr_addr,
+                state.word_size,
             )
-        };
-        state.transfer =
-            Some(unsafe { core::mem::transmute::<Transfer<'_>, Transfer<'static>>(transfer) });
+        });
     }
 }
 
@@ -260,7 +290,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         // insure the framebuffer wordsize matches the pins we are passing at compile time
         FB: FrameBuffer<Word = P::Word>,
     {
-        let odr_byte_addr = pins.configure_and_get_odr(config.gpio_speed);
+        let odr_addr = pins.configure_and_get_odr(config.gpio_speed);
 
         let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
 
@@ -305,7 +335,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
                     channel,
                     transfer: None,
                     dma_request,
-                    odr_byte_addr: odr_byte_addr.cast::<u8>(),
+                    odr_addr,
+                    word_size: P::DMA_WORD_SIZE,
                     bcm: BcmState::new(),
                     current_fb_ptr: core::ptr::null(),
                     pending_planes: None,
@@ -398,7 +429,7 @@ macro_rules! hub75_define {
             use $crate::__macro_support::embassy_stm32::timer::{Ch1, TimerPin, UpDma};
             use $crate::__macro_support::embassy_stm32::Peri;
             use $crate::framebuffer::FrameBuffer;
-            use $crate::latched::{self, IsrCore, TimerSlot};
+            use $crate::dma::{self as dma_driver, IsrCore, TimerSlot};
 
             static TIMER: TimerSlot<$timer> =
                 critical_section::Mutex::new(core::cell::RefCell::new(None));
@@ -425,7 +456,7 @@ macro_rules! hub75_define {
             }
 
             /// Type alias for the HUB75 driver bound to this instance's timer.
-            pub type Hub75<'d, FB> = latched::Hub75<'d, $timer, FB>;
+            pub type Hub75<'d, FB> = dma_driver::Hub75<'d, $timer, FB>;
 
             /// Initialize the HUB75 driver, configure hardware, and start
             /// rendering from the provided framebuffer.
@@ -448,7 +479,7 @@ macro_rules! hub75_define {
                 $dma_ch: UpDma<$timer>,
                 FB: FrameBuffer<Word = P::Word>,
             {
-                latched::Hub75::new(
+                dma_driver::Hub75::new(
                     tim, clock_pin, dma_ch, dma_irq, pins, config, fb,
                     &CORE, &TIMER,
                 )

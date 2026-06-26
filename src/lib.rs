@@ -7,7 +7,7 @@
 //!
 //! This library uses an ISR-driven DMA refresh loop to continuously output
 //! framebuffer data to a GPIO port. A timer generates the pixel clock via PWM
-//! and triggers DMA byte-transfers on each update event. Once the driver is
+//! and triggers DMA transfers on each update event. Once the driver is
 //! initialised via `hub75_define!`'s `init()` function, rendering happens
 //! entirely in the background via DMA transfer-complete interrupts — no CPU
 //! involvement per pixel.
@@ -18,15 +18,20 @@
 //! application writes to one framebuffer while the ISR renders from another,
 //! swapping atomically at frame boundaries.
 //!
-//! ## Latched (8-bit) Mode
+//! ## 8-bit Mode
 //!
-//! This driver supports the **latched** HUB75 configuration, where an
-//! external 74HC574-style latch handles the row address lines. This requires
-//! only 8 data pins: R1, G1, B1, R2, G2, B2, LATCH, and BLANK. The 8 pins
-//! must occupy either the lower byte (pins 0-7) or upper byte (pins 8-15) of
-//! a single GPIO port, and the pins must be in the correct order (R1 on bit 0,
-//! G1 on bit 1, etc.). Byte-width DMA writes to the corresponding ODR byte
-//! update only those 8 pins without disturbing the other half of the port.
+//! In 8-bit mode, an external 74HC574-style latch handles the row address
+//! lines. This requires only 8 data pins: R1, G1, B1, R2, G2, B2, LATCH,
+//! and BLANK. The 8 pins must occupy either the lower byte (pins 0-7) or
+//! upper byte (pins 8-15) of a single GPIO port. Byte-width DMA writes to
+//! the corresponding ODR byte update only those 8 pins without disturbing
+//! the other half of the port.
+//!
+//! ## 16-bit Mode
+//!
+//! In 16-bit mode, all 16 pins of a GPIO port are used. Half-word-width DMA
+//! writes the full ODR register on each clock cycle. Pin layout and bit
+//! assignments depend on the framebuffer implementation used.
 //!
 //! ## Framebuffers
 //!
@@ -70,6 +75,7 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::Peri;
 pub use hub75_framebuffer as framebuffer;
 
@@ -78,7 +84,7 @@ pub use hub75_framebuffer::Color;
 
 #[doc(hidden)]
 pub mod bcm;
-pub mod latched;
+pub mod dma;
 
 /// Re-exports used by the [`hub75_define!`] macro. Not part of the public API.
 #[doc(hidden)]
@@ -93,7 +99,7 @@ use embassy_stm32::gpio::{AnyPin, Flex, Level, Pin};
 pub use embassy_stm32::gpio::Speed;
 pub use embassy_stm32::time::Hertz;
 
-/// Driver configuration for pixel clock frequency (defaults to 20 MHz) and GPIO output speed (defaults to Medium).
+/// Driver configuration for pixel clock frequency (defaults to 10 MHz) and GPIO output speed (defaults to Medium).
 #[non_exhaustive]
 #[derive(Copy, Clone)]
 pub struct Config {
@@ -134,11 +140,13 @@ impl Default for Config {
     }
 }
 
-/// Trait for configuring and getting the ODR pointer for a HUB75 panel.
+/// Trait implemented by HUB75 pin groups (8-bit or 16-bit).
 pub trait Hub75Pins {
-    /// The word type for the GPIO port (u8 for 8-bit ports, u16 for 16-bit ports)
+    /// The word type for the GPIO port (`u8` for 8-bit ports, `u16` for 16-bit ports).
     type Word;
-    /// Configure the pins and get the ODR pointer. Returns a pointer to a u8 and will need casting for u16.
+    /// DMA word size matching [`Self::Word`].
+    const DMA_WORD_SIZE: WordSize;
+    /// Configure the pins and get the ODR pointer.
     fn configure_and_get_odr(self, speed: Speed) -> *mut u8;
 }
 
@@ -236,6 +244,7 @@ impl Hub75Pins8 {
 
 impl Hub75Pins for Hub75Pins8 {
     type Word = u8;
+    const DMA_WORD_SIZE: WordSize = WordSize::OneByte;
     fn configure_and_get_odr(self, speed: Speed) -> *mut u8 {
         let gpio = self.pins[0].block();
         let byte_offset = usize::from(self.base_pin != 0);
@@ -255,19 +264,100 @@ impl Hub75Pins for Hub75Pins8 {
     }
 }
 
+/// Pin configuration for a HUB75 panel using 16 data pins (full GPIO port width).
+///
+/// All 16 pins must be on the same GPIO port, occupying pins 0-15 in order.
+/// The DMA writes a full `u16` to the ODR register on each clock cycle.
+///
+/// The data pins map directly to the `hub75-framebuffer` 16-bit layout.
+/// Specific bit assignments depend on the framebuffer implementation used.
+///
+/// The clock pin is passed separately to the `init()` constructor as a raw
+/// GPIO pin. It must be a valid timer channel 1 output for the chosen timer
+/// (enforced at compile time). The driver configures it as a PWM output
+/// internally.
+///
+/// Use [`Hub75Pins16::new()`] to construct; it validates pin layout at
+/// creation time.
+pub struct Hub75Pins16 {
+    /// The 16 GPIO pins in order (pin 0 through pin 15).
+    pub pins: [AnyPin; 16],
+}
+
+impl Hub75Pins16 {
+    /// Create a validated 16-pin configuration.
+    ///
+    /// All 16 pins must be on the same GPIO port and must occupy pins 0-15
+    /// consecutively.
+    ///
+    /// # Errors
+    /// Returns [`Hub75Error::PinNotOnSamePort`] if any pin is on a
+    /// different GPIO port than the first, or
+    /// [`Hub75Error::PinsNotConsecutive`] if the pins are not
+    /// consecutive starting at pin 0.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(pins: [AnyPin; 16]) -> Result<Self, Hub75Error> {
+        let port = pins[0].port();
+        let first = pins[0].pin();
+
+        if first != 0 {
+            return Err(Hub75Error::PinsNotConsecutive {
+                index: 0,
+                expected: 0,
+                actual: first,
+            });
+        }
+
+        for (i, pin) in pins.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let i = i as u8;
+            if pin.port() != port {
+                return Err(Hub75Error::PinNotOnSamePort { index: i });
+            }
+            let expected = i;
+            if pin.pin() != expected {
+                return Err(Hub75Error::PinsNotConsecutive {
+                    index: i,
+                    expected,
+                    actual: pin.pin(),
+                });
+            }
+        }
+
+        Ok(Self { pins })
+    }
+}
+
+impl Hub75Pins for Hub75Pins16 {
+    type Word = u16;
+    const DMA_WORD_SIZE: WordSize = WordSize::TwoBytes;
+    fn configure_and_get_odr(self, speed: Speed) -> *mut u8 {
+        let gpio = self.pins[0].block();
+        let odr_addr = gpio.odr().as_ptr().cast::<u8>();
+
+        for pin in self.pins {
+            let peri = unsafe { Peri::new_unchecked(pin) };
+            let mut flex = Flex::new(peri);
+            flex.set_as_output(speed);
+            core::mem::forget(flex);
+        }
+        odr_addr
+    }
+}
+
 /// Represents errors that can occur during HUB75 driver operations.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Hub75Error {
     /// A pin is on a different GPIO port than the others.
-    /// `index` is the position in the pin list (0=R1 .. 7=BLANK).
+    /// `index` is the position in the pin list.
     PinNotOnSamePort {
-        /// Index of the offending pin (0=R1, 1=G1, ..., 7=BLANK).
+        /// Index of the offending pin.
         index: u8,
     },
-    /// The pins are not 8 consecutive pins starting at 0 or 8.
+    /// The pins are not consecutive starting at the expected position.
     PinsNotConsecutive {
-        /// Index of the offending pin (0=R1, 1=G1, ..., 7=BLANK).
+        /// Index of the offending pin.
         index: u8,
         /// Expected pin number.
         expected: u8,
