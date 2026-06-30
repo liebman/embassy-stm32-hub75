@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "hub75-framebuffer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bitfield 0.19.4",
  "defmt 1.1.0",

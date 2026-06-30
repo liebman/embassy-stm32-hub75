@@ -44,6 +44,8 @@ defmt = [
 
 # only used for documentation!
 stm32f722 = ["embassy-stm32/stm32f722ze"]
+stm32h723 = ["embassy-stm32/stm32h723zg"]
+stm32wl55 = ["embassy-stm32/stm32wl55jc-cm4"]
 
 [package.metadata.docs.rs]
 features = ["stm32f722"]

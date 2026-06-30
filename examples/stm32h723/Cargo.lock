@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "hub75-framebuffer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bitfield 0.19.4",
  "defmt 1.1.0",
@@ -812,12 +812,6 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
-
-[[package]]
-name = "numtoa"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e4d8a81ede501fad07191e746a299f4d79f6dcd053bab1b97af4ff5a90099f2"
 
 [[package]]
 name = "once_cell"
@@ -1033,7 +1027,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "stm32wl55-examples"
+name = "stm32h723-examples"
 version = "0.1.0"
 dependencies = [
  "cortex-m",
@@ -1045,8 +1039,8 @@ dependencies = [
  "embassy-stm32-hub75",
  "embassy-time",
  "embedded-graphics",
+ "heapless",
  "hub75-framebuffer",
- "numtoa",
  "panic-probe",
  "static_cell",
 ]

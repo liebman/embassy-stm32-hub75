@@ -18,8 +18,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Poll, Waker};
 
 use critical_section::Mutex;
-use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
 use embassy_stm32::dma::word::WordSize;
+use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
 use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
@@ -77,7 +77,12 @@ unsafe fn kick_dma(
         WordSize::TwoBytes => {
             let elem_count = len / 2;
             let buf = core::ptr::slice_from_raw_parts(ptr.cast::<u16>(), elem_count);
-            channel.write_raw(request, buf, odr_addr.cast::<u16>(), TransferOptions::default())
+            channel.write_raw(
+                request,
+                buf,
+                odr_addr.cast::<u16>(),
+                TransferOptions::default(),
+            )
         }
         _ => unreachable!(),
     };
@@ -275,7 +280,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     #[doc(hidden)]
     #[allow(clippy::needless_pass_by_value)]
     #[allow(clippy::too_many_arguments)]
-    pub fn new<D: UpDma<T> + ChannelInstance, P:Hub75Pins>(
+    pub fn new<D: UpDma<T> + ChannelInstance, P: Hub75Pins>(
         tim: Peri<'d, T>,
         clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
         dma_ch: Peri<'d, D>,
@@ -285,8 +290,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         fb: &'static mut FB,
         core: &'static IsrCore,
         timer_slot: &'static TimerSlot<T>,
-    ) -> Self 
-    where 
+    ) -> Self
+    where
         // insure the framebuffer wordsize matches the pins we are passing at compile time
         FB: FrameBuffer<Word = P::Word>,
     {
@@ -460,7 +465,7 @@ macro_rules! hub75_define {
 
             /// Initialize the HUB75 driver, configure hardware, and start
             /// rendering from the provided framebuffer.
-            pub fn init<'d, P: $crate::Hub75Pins, FB: FrameBuffer>(
+            pub fn init<'d, P: $crate::Hub75Pins, FB>(
                 tim: Peri<'d, $timer>,
                 clock_pin: Peri<'d, impl TimerPin<$timer, Ch1>>,
                 dma_ch: Peri<'d, $dma_ch>,
