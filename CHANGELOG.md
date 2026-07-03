@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.1.0] - 2026-07-03
+
 - Initial release
 - ISR-driven DMA refresh with BCM grayscale (1-8 planes)
 - Double buffering with atomic frame swap
@@ -19,3 +21,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-url -->
 [Unreleased]: https://github.com/liebman/embassy-stm32-hub75/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/liebman/embassy-stm32-hub75/compare/v0.1.0...v0.1.0
