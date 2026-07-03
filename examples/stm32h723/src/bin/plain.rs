@@ -21,7 +21,6 @@ use core::sync::atomic::Ordering;
 use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::Speed;
 use embassy_stm32::rcc::{
     AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk,
     VoltageScale,
@@ -226,9 +225,7 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH0,
         Irqs,
         pins,
-        Config::new()
-            .frequency(Hertz(20_000_000))
-            .gpio_speed(Speed::VeryHigh),
+        Config::new().frequency(Hertz(18_000_000)),
         fb0,
     );
     info!("Hub75 started");
