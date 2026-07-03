@@ -31,7 +31,7 @@ embedded-graphics = "0.8.2"
 embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
-hub75-framebuffer = "0.8.0"
+hub75-framebuffer = "0.9.0"
 
 [features]
 default = []
@@ -44,7 +44,14 @@ defmt = [
 
 # only used for documentation!
 stm32f722 = ["embassy-stm32/stm32f722ze"]
+stm32h723 = ["embassy-stm32/stm32h723zg"]
+stm32wl55 = ["embassy-stm32/stm32wl55jc-cm4"]
 
 [package.metadata.docs.rs]
 features = ["stm32f722"]
 targets = ["thumbv7em-none-eabi"]
+
+
+# [patch.crates-io]
+
+# hub75-framebuffer = { path = "../hub75-framebuffer" }

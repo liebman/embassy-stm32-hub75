@@ -46,6 +46,17 @@ update only those 8 pins without disturbing the other half of the port.
 The required latch circuit schematic and explanation can be found in the
 [hub75-framebuffer README](https://github.com/liebman/hub75-framebuffer#the-latch-circuit).
 
+### Plain (16-pin)
+
+The **plain** configuration uses all 16 pins of a GPIO port. Half-word-width
+DMA writes the full ODR register on each clock cycle. Row address, control,
+and data signals are all driven directly — no external latch is required. Pin
+layout and bit assignments depend on the framebuffer implementation used (see
+the `hub75-framebuffer` crate for details).
+
+Use `Hub75Pins16::new(pins)` with an array of 16 `AnyPin` values, all on the
+same GPIO port occupying pins 0-15 in order.
+
 ## Quick start
 
 ```rust
@@ -110,6 +121,8 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
 ## Pin wiring
 
+### 8-bit latched mode
+
 The 8 data pins map to the `hub75-framebuffer` latched byte layout:
 
 | Bit | Signal |
@@ -123,16 +136,40 @@ The 8 data pins map to the `hub75-framebuffer` latched byte layout:
 | 6   | LATCH  |
 | 7   | BLANK  |
 
+### 16-bit plain mode
+
+All 16 pins of a GPIO port are used. The bit mapping from the
+`hub75-framebuffer` bitplane plain layout:
+
+| Bit   | Signal       |
+|-------|--------------|
+| 0-4   | A..E (row address) |
+| 5     | LAT (latch)  |
+| 6-7   | (unused)     |
+| 8     | OE (blank)   |
+| 9     | R1           |
+| 10    | G1           |
+| 11    | B1           |
+| 12    | R2           |
+| 13    | G2           |
+| 14    | B2           |
+| 15    | (unused)     |
+
+### Clock pin
+
 The clock pin is passed separately and must be a valid TIM CH1 output for the
 chosen timer (enforced at compile time).
 
 ## Examples
 
-Working examples are provided for two targets:
+Working examples are provided for three targets:
 
 - **STM32WL55** (`examples/stm32wl55/`) -- 64x64 panel at 6 MHz pixel clock
+  (8-bit latched mode)
 - **STM32F722** (`examples/stm32f722/`) -- 64x64 panel at 20 MHz pixel clock,
-  includes a multi-task latched example with FPS counters
+  includes a multi-task latched example with FPS counters (8-bit latched mode)
+- **STM32H723** (`examples/stm32h723/`) -- 64x64 panel at 18 MHz pixel clock,
+  16-bit plain mode on PD0-PD15 with TIM1 CLK on PE9
 
 Each example overrides `Config::frequency` for its target while using the
 default `Speed::Medium` GPIO output speed.
