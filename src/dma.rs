@@ -5,7 +5,7 @@
 //! logic lives in library code ([`Hub75`], [`IsrCore`]) with full IDE support.
 //!
 //! Supports both 8-bit (byte-width) and 16-bit (half-word-width) GPIO port
-//! configurations via the [`Hub75Pins`](crate::Hub75Pins) trait.
+//! configurations via the [`Hub75Pins`] trait.
 //!
 //! The ISR stops and resets the timer between planes for deterministic clock
 //! alignment, then delegates BCM/DMA work to [`IsrCore::on_dma_complete()`].
@@ -76,10 +76,12 @@ unsafe fn kick_dma(
         }
         WordSize::TwoBytes => {
             let elem_count = len / 2;
+            #[allow(clippy::cast_ptr_alignment)]
             let buf = core::ptr::slice_from_raw_parts(ptr.cast::<u16>(), elem_count);
             channel.write_raw(
                 request,
                 buf,
+                #[allow(clippy::cast_ptr_alignment)]
                 odr_addr.cast::<u16>(),
                 TransferOptions::default(),
             )

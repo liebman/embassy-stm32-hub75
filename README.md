@@ -57,6 +57,22 @@ the `hub75-framebuffer` crate for details).
 Use `Hub75Pins16::new(pins)` with an array of 16 `AnyPin` values, all on the
 same GPIO port occupying pins 0-15 in order.
 
+## Cargo features
+
+All `hub75-framebuffer` features are forwarded through this crate so you do not
+need a direct dependency on `hub75-framebuffer`:
+
+| Feature | Description |
+|---------|-------------|
+| `defmt` | Enable `defmt` logging (forwards to embassy-stm32, hub75-framebuffer, and embedded-graphics) |
+| `skip-black-pixels` | Skip writing black pixels to the framebuffer, leaving bitplane data unchanged |
+| `invert-oe` | Invert the output-enable signal in the framebuffer |
+| `tail-closes-latch` | Append a tail word that closes the latch after data is shifted in (plain 16-bit mode only) |
+| `blank-delay-1` | Insert 1 blank delay cycle after latching (plain 16-bit mode only) |
+| `blank-delay-2` | Insert 2 blank delay cycles after latching (plain 16-bit mode only) |
+| `blank-delay-4` | Insert 4 blank delay cycles after latching (plain 16-bit mode only) |
+| `blank-delay-8` | Insert 8 blank delay cycles after latching (plain 16-bit mode only) |
+
 ## Quick start
 
 ```rust

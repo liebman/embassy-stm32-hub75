@@ -36,10 +36,13 @@
 //! ## Framebuffers
 //!
 //! The `hub75-framebuffer` crate provides bitplane framebuffers that are
-//! strongly recommended for their memory efficiency. The bitplane latched
-//! variant (`framebuffer::bitplane::latched::DmaFrameBuffer`) stores one bit
-//! per pixel per plane, and the driver outputs the data via DMA without any
-//! format conversion.
+//! strongly recommended for their memory efficiency. The plain 16-bit variant
+//! requires no external hardware beyond the panel itself. The latched 8-bit
+//! variant saves GPIO pins and cuts framebuffer memory nearly in half (one
+//! byte per pixel-clock instead of two), but requires an external
+//! 74HC574-style latch circuit (see the `hub75-framebuffer` README for the
+//! schematic). Both store one bit per pixel per plane and are output via DMA
+//! without format conversion.
 //!
 //! ## Defining an Instance
 //!
@@ -67,8 +70,16 @@
 //!
 //! ## Crate Features
 //!
-//! - `stm32wl55`: Enable support for the STM32WL55
-//! - `defmt`: Enable logging with `defmt`
+//! - `defmt` -- enable `defmt` logging (forwards to embassy-stm32, hub75-framebuffer,
+//!   and embedded-graphics)
+//! - `skip-black-pixels` -- skip writing black pixels to the framebuffer,
+//!   leaving the bitplane data unchanged (forwards to hub75-framebuffer)
+//! - `invert-oe` -- invert the output-enable signal in the framebuffer
+//!   (forwards to hub75-framebuffer)
+//! - `tail-closes-latch` -- append a tail word that closes the latch after data
+//!   is shifted in; plain 16-bit mode only (forwards to hub75-framebuffer)
+//! - `blank-delay-{1,2,4,8}` -- insert 1/2/4/8 blank delay cycles after
+//!   latching; plain 16-bit mode only (forwards to hub75-framebuffer)
 
 #![no_std]
 #![warn(missing_docs)]

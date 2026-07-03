@@ -1048,7 +1048,6 @@ dependencies = [
  "embassy-time",
  "embedded-graphics",
  "heapless",
- "hub75-framebuffer",
  "numtoa",
  "panic-probe",
  "static_cell",

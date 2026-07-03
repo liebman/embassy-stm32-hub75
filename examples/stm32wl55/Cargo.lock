@@ -1047,7 +1047,6 @@ dependencies = [
  "embassy-stm32-hub75",
  "embassy-time",
  "embedded-graphics",
- "hub75-framebuffer",
  "numtoa",
  "panic-probe",
  "static_cell",
