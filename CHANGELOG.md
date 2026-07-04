@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.2.0] - 2026-07-04
+
 ### ⚠️ Breaking
 
 - `Hub75::swap()` now takes `&mut self` instead of `&self`
@@ -33,5 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Examples for STM32WL55, STM32F722, and STM32H723
 
 <!-- next-url -->
-[Unreleased]: https://github.com/liebman/embassy-stm32-hub75/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/liebman/embassy-stm32-hub75/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/liebman/embassy-stm32-hub75/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/liebman/embassy-stm32-hub75/compare/v0.1.0...v0.1.0
