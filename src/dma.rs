@@ -56,6 +56,17 @@ struct IsrCoreState {
     returned_fb_ptr: *const (),
 }
 
+// SAFETY: IsrCoreState contains raw pointers (`odr_addr`, `current_fb_ptr`,
+// `pending_fb_ptr`, `returned_fb_ptr`, and the `*const u8` pointers inside
+// `PlaneInfo`) which prevent auto-`Send`. These pointers are safe to send
+// across execution contexts because they exclusively target either:
+// - Memory-mapped GPIO ODR registers (fixed hardware addresses, valid for the
+//   entire program lifetime), or
+// - `'static` framebuffer allocations whose ownership is tracked by the
+//   double-buffering protocol.
+// All access is guarded by the critical-section `Mutex` in `IsrCore`.
+unsafe impl Send for IsrCoreState {}
+
 /// Start a DMA transfer with the correct word width.
 ///
 /// # Safety
@@ -75,6 +86,14 @@ unsafe fn kick_dma(
             channel.write_raw(request, buf, odr_addr, TransferOptions::default())
         }
         WordSize::TwoBytes => {
+            debug_assert!(
+                ptr.align_offset(core::mem::align_of::<u16>()) == 0,
+                "DMA source buffer is not u16-aligned"
+            );
+            debug_assert!(
+                len.is_multiple_of(2),
+                "DMA buffer length is not a multiple of 2"
+            );
             let elem_count = len / 2;
             #[allow(clippy::cast_ptr_alignment)]
             let buf = core::ptr::slice_from_raw_parts(ptr.cast::<u16>(), elem_count);
@@ -86,8 +105,15 @@ unsafe fn kick_dma(
                 TransferOptions::default(),
             )
         }
-        _ => unreachable!(),
+        _ => unreachable!("HUB75 driver only supports OneByte and TwoBytes DMA word sizes"),
     };
+    // SAFETY: Transfer<'a> → Transfer<'static>. Transfer internally borrows a
+    // Channel<'a> which is a u8 channel number + PhantomData lifetime marker —
+    // it holds no actual reference to borrowed memory. The channel it logically
+    // borrows lives in the same IsrCoreState static, so the referent outlives
+    // the transfer. This assumption is coupled to the embassy-stm32 version
+    // pinned in Cargo.toml; if Transfer's internal representation changes to
+    // carry real borrows, this transmute must be revisited.
     core::mem::transmute::<Transfer<'_>, Transfer<'static>>(transfer)
 }
 
@@ -101,7 +127,10 @@ pub struct IsrCore {
     frame_count: AtomicU32,
 }
 
-// SAFETY: IsrCore only contains Mutex/Atomic fields — all thread-safe.
+// SAFETY: IsrCore fields are all inherently Sync (Mutex, AtomicBool,
+// AtomicU32) except that `Mutex<RefCell<Option<IsrCoreState>>>` requires
+// `IsrCoreState: Send` for the `Mutex` to be `Sync`. That bound is
+// satisfied by the `unsafe impl Send for IsrCoreState` above.
 unsafe impl Sync for IsrCore {}
 
 impl IsrCore {
@@ -297,7 +326,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         // insure the framebuffer wordsize matches the pins we are passing at compile time
         FB: FrameBuffer<Word = P::Word>,
     {
-        let odr_addr = pins.configure_and_get_odr(config.gpio_speed);
+        let odr_addr = pins.configure_and_get_odr(config.gpio_speed).as_ptr();
 
         let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
 
@@ -311,7 +340,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         timer.set_autoreload_preload(true);
 
         let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(TimChannel::Ch1, (max * 4 / 5).try_into().ok().unwrap());
+        timer.set_compare_value(
+            TimChannel::Ch1,
+            (u64::from(max) * 4 / 5).try_into().unwrap(),
+        );
 
         timer.enable_channel(TimChannel::Ch1, true);
         timer.generate_update_event();
@@ -324,15 +356,23 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
 
         critical_section::with(|cs| {
-            // SAFETY: Timer<'d> → Timer<'static>. The peripheral is consumed by
-            // this driver and lives for the program's lifetime. Wrapped in
-            // ManuallyDrop to prevent rcc::disable on drop.
+            // SAFETY: Timer<'d> → Timer<'static>. The timer peripheral is
+            // consumed by this driver and will never be released — it lives
+            // for the program's lifetime. Timer internally stores a
+            // PhantomData lifetime marker over a register block pointer, not
+            // an actual borrow. Wrapped in ManuallyDrop to prevent
+            // rcc::disable on drop. This assumption is coupled to the
+            // embassy-stm32 version pinned in Cargo.toml.
             let timer_static: ManuallyDrop<Timer<'static, T>> = ManuallyDrop::new(unsafe {
                 core::mem::transmute::<Timer<'_, T>, Timer<'static, T>>(timer)
             });
             *timer_slot.borrow_ref_mut(cs) = Some(timer_static);
 
-            // SAFETY: Channel<'d> → Channel<'static>. Same justification.
+            // SAFETY: Channel<'d> → Channel<'static>. The DMA channel
+            // peripheral is consumed by this driver and will never be
+            // released. Channel internally stores a u8 channel number +
+            // PhantomData lifetime marker — no actual borrow. Same
+            // embassy-stm32 version coupling as the Timer transmute above.
             let channel: Channel<'static> =
                 unsafe { core::mem::transmute::<Channel<'_>, Channel<'static>>(channel) };
 
@@ -379,7 +419,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     ///
     /// # Errors
     /// Returns `Hub75Error::NotInitialised` if the driver has not been initialised.
-    pub async fn swap(&self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
+    pub async fn swap(&mut self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
         let (new_planes, _) = planes_from_fb(new_fb);
         let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
         // SAFETY: fb_ptr originated from a valid &'static mut FB.

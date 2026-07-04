@@ -67,6 +67,10 @@ impl BcmState {
     /// Returns `true` when a full BCM frame boundary is reached (all planes
     /// with all repetitions have been output).
     pub fn advance(&mut self) -> bool {
+        debug_assert!(
+            self.plane_count > 0,
+            "BcmState::advance called before initialization"
+        );
         self.current_rep += 1;
         let reps = 1usize << (self.plane_count - 1 - self.current_plane);
         if self.current_rep >= reps {
