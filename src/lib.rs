@@ -86,6 +86,8 @@
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 
+use core::ptr::NonNull;
+
 use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::Peri;
 pub use hub75_framebuffer as framebuffer;
@@ -103,6 +105,8 @@ pub mod __macro_support {
     pub use critical_section;
     pub use embassy_stm32;
 }
+
+use core::mem::ManuallyDrop;
 
 use embassy_stm32::gpio::{AnyPin, Flex, Level, Pin};
 
@@ -151,15 +155,24 @@ impl Default for Config {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// Trait implemented by HUB75 pin groups (8-bit or 16-bit).
-pub trait Hub75Pins {
+///
+/// This trait is sealed and cannot be implemented outside of this crate.
+pub trait Hub75Pins: sealed::Sealed {
     /// The word type for the GPIO port (`u8` for 8-bit ports, `u16` for 16-bit ports).
     type Word;
     /// DMA word size matching [`Self::Word`].
     const DMA_WORD_SIZE: WordSize;
     /// Configure the pins and get the ODR pointer.
-    fn configure_and_get_odr(self, speed: Speed) -> *mut u8;
+    fn configure_and_get_odr(self, speed: Speed) -> NonNull<u8>;
 }
+
+impl sealed::Sealed for Hub75Pins8 {}
+impl sealed::Sealed for Hub75Pins16 {}
 
 /// Pin configuration for a HUB75 panel with an external address latch.
 ///
@@ -256,22 +269,25 @@ impl Hub75Pins8 {
 impl Hub75Pins for Hub75Pins8 {
     type Word = u8;
     const DMA_WORD_SIZE: WordSize = WordSize::OneByte;
-    fn configure_and_get_odr(self, speed: Speed) -> *mut u8 {
+    fn configure_and_get_odr(self, speed: Speed) -> NonNull<u8> {
         let gpio = self.pins[0].block();
+        // STM32 ODR is a 32-bit little-endian register: byte offset 0
+        // addresses the lower byte (pins 0-7), offset 1 the upper byte
+        // (pins 8-15).
         let byte_offset = usize::from(self.base_pin != 0);
         let odr_byte_addr = unsafe { (gpio.odr().as_ptr().cast::<u8>()).add(byte_offset) };
 
         for (i, pin) in self.pins.into_iter().enumerate() {
             // SAFETY: we own the AnyPin and will leak the Flex to keep it alive.
             let peri = unsafe { Peri::new_unchecked(pin) };
-            let mut flex = Flex::new(peri);
+            let mut flex = ManuallyDrop::new(Flex::new(peri));
             if i == 7 {
                 flex.set_level(Level::High);
             }
             flex.set_as_output(speed);
-            core::mem::forget(flex);
         }
-        odr_byte_addr
+        // SAFETY: ODR is a memory-mapped hardware register, always non-null.
+        unsafe { NonNull::new_unchecked(odr_byte_addr) }
     }
 }
 
@@ -342,17 +358,17 @@ impl Hub75Pins16 {
 impl Hub75Pins for Hub75Pins16 {
     type Word = u16;
     const DMA_WORD_SIZE: WordSize = WordSize::TwoBytes;
-    fn configure_and_get_odr(self, speed: Speed) -> *mut u8 {
+    fn configure_and_get_odr(self, speed: Speed) -> NonNull<u8> {
         let gpio = self.pins[0].block();
         let odr_addr = gpio.odr().as_ptr().cast::<u8>();
 
         for pin in self.pins {
             let peri = unsafe { Peri::new_unchecked(pin) };
-            let mut flex = Flex::new(peri);
+            let mut flex = ManuallyDrop::new(Flex::new(peri));
             flex.set_as_output(speed);
-            core::mem::forget(flex);
         }
-        odr_addr
+        // SAFETY: ODR is a memory-mapped hardware register, always non-null.
+        unsafe { NonNull::new_unchecked(odr_addr) }
     }
 }
 
@@ -382,3 +398,28 @@ pub enum Hub75Error {
     /// The driver has not been initialised yet.
     NotInitialised,
 }
+
+impl core::fmt::Display for Hub75Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PinNotOnSamePort { index } => {
+                write!(f, "pin at index {index} is on a different GPIO port")
+            }
+            Self::PinsNotConsecutive {
+                index,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "pin at index {index} is not consecutive: expected pin {expected}, got {actual}"
+                )
+            }
+            Self::Dma => f.write_str("DMA error"),
+            Self::Timer => f.write_str("timer configuration error"),
+            Self::NotInitialised => f.write_str("driver not initialised"),
+        }
+    }
+}
+
+impl core::error::Error for Hub75Error {}

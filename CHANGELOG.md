@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### ⚠️ Breaking
+
+- `Hub75::swap()` now takes `&mut self` instead of `&self`
+- `Hub75Pins` trait is now sealed (cannot be implemented outside this crate)
+
+### Added
+
+- `Hub75Error` now implements `Display` and `core::error::Error`
+
+### Fixed
+
+- Potential `u32` overflow in timer compare value calculation on 32-bit timers
+
 ## [0.1.0] - 2026-07-03
 
 - Initial release

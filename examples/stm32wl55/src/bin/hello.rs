@@ -116,7 +116,7 @@ async fn main(_spawner: Spawner) {
         .build();
 
     info!("Starting ISR-driven rendering");
-    let hub75 = hub75::init(
+    let mut hub75 = hub75::init(
         p.TIM2,
         p.PA0,
         p.DMA1_CH1,

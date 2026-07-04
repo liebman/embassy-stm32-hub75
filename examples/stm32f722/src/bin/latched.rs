@@ -77,7 +77,7 @@ static RENDER_RATE: AtomicU32 = AtomicU32::new(0);
 static SIMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[embassy_executor::task]
-async fn display_task(hub75: hub75::Hub75<'static, FBType>, mut fb: &'static mut FBType) {
+async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static mut FBType) {
     info!("display_task: starting!");
     let fps_style = MonoTextStyleBuilder::new()
         .font(&FONT_5X7)
