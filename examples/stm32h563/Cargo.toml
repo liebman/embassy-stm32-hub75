@@ -1,0 +1,40 @@
+[package]
+name = "stm32h563-examples"
+description = "GPDMA linked-list examples for embassy-stm32-hub75 on STM32H563"
+repository = "https://github.com/liebman/embassy-stm32-hub75"
+edition = "2021"
+version = "0.1.0"
+
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = "s"
+overflow-checks = false
+
+[profile.dev]
+debug = true  # Symbols are nice and they don't increase the size on Flash
+opt-level = 2
+
+[dependencies]
+embassy-stm32-hub75 = { path = "../../", features = ["defmt", "gpdma", "skip-black-pixels"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+defmt-rtt = "1.3.0"
+defmt = "1.1.0"
+embassy-stm32 = { version = "0.6.0", features = [
+    "time-driver-tim2",
+    "memory-x",
+    "stm32h563zi",
+] }
+embassy-executor = { version = "0.10.0", features = [
+    "platform-cortex-m",
+    "executor-thread",
+] }
+embedded-graphics = "0.8.2"
+embassy-time = "0.5.1"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+static_cell = "2.1.1"
+heapless = "0.9.3"

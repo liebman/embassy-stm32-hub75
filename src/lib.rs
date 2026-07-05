@@ -98,6 +98,8 @@ pub use hub75_framebuffer::Color;
 #[doc(hidden)]
 pub mod bcm;
 pub mod dma;
+#[cfg(feature = "gpdma")]
+pub mod gpdma;
 
 /// Re-exports used by the [`hub75_define!`] macro. Not part of the public API.
 #[doc(hidden)]

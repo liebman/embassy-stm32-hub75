@@ -60,6 +60,8 @@ trail-blank-16 = ["hub75-framebuffer/trail-blank-16"]
 stm32f722 = ["embassy-stm32/stm32f722ze"]
 stm32h723 = ["embassy-stm32/stm32h723zg"]
 stm32wl55 = ["embassy-stm32/stm32wl55jc-cm4"]
+stm32u575 = ["embassy-stm32/stm32u575zi"]
+stm32h563 = ["embassy-stm32/stm32h563zi"]
 
 [package.metadata.docs.rs]
 features = ["stm32f722"]
@@ -68,4 +70,7 @@ targets = ["thumbv7em-none-eabi"]
 
 # [patch.crates-io]
 
+# embassy-stm32 = { path = "../embassy-stm32" }
+
 # hub75-framebuffer = { path = "../hub75-framebuffer" }
+
