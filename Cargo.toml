@@ -67,10 +67,21 @@ stm32h563 = ["embassy-stm32/stm32h563zi"]
 features = ["stm32f722"]
 targets = ["thumbv7em-none-eabi"]
 
+[patch.crates-io]
+# embassy-stm32 = { path = "../../../embassy/embassy-stm32" }
+# embassy-time-driver = { path = "../../../embassy/embassy-time-driver" }
+# embassy-time = { path = "../../../embassy/embassy-time" }
+# embassy-sync = { path = "../../../embassy/embassy-sync" }
+# embassy-executor = { path = "../../../embassy/embassy-executor" }
+# embassy-futures = { path = "../../../embassy/embassy-futures" }
 
-# [patch.crates-io]
+embassy-stm32 = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
+embassy-time-driver = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
+embassy-time = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
+embassy-sync = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
+embassy-executor = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
+embassy-futures = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
 
-# embassy-stm32 = { path = "../embassy-stm32" }
 
 # hub75-framebuffer = { path = "../hub75-framebuffer" }
 

@@ -14,7 +14,8 @@
 //!
 //! The ISR stops and resets the timer at each frame boundary for
 //! deterministic clock alignment, then delegates swap/restart work
-//! to [`GpdmaIsrCore::on_chain_complete()`].
+//! to [`GpdmaIsrCore::on_chain_complete()`] and
+//! [`GpdmaIsrCore::restart_chain()`].
 
 use core::cell::RefCell;
 use core::future::poll_fn;
@@ -27,10 +28,12 @@ use critical_section::Mutex;
 #[doc(hidden)]
 pub use embassy_stm32::dma::linked_list::LinearItem;
 use embassy_stm32::dma::word::WordSize;
-use embassy_stm32::dma::{self, ChannelInstance};
+use embassy_stm32::dma::{
+    self, Channel, ChannelInstance, Priority, Table, TransferCompleteMode, TransferOptions,
+};
 use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
-use embassy_stm32::pac::gpdma::{regs, vals, Gpdma};
+use embassy_stm32::pac::gpdma::regs;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
 use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
@@ -68,87 +71,13 @@ const fn descriptor_count(plane_count: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Register-field helpers
-// ---------------------------------------------------------------------------
-
-fn word_size_to_dw(ws: WordSize) -> vals::Dw {
-    match ws {
-        WordSize::OneByte => vals::Dw::BYTE,
-        WordSize::TwoBytes => vals::Dw::HALF_WORD,
-        _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
-    }
-}
-
-fn build_tr1(word_size: WordSize) -> regs::ChTr1 {
-    let mut tr1 = regs::ChTr1(0);
-    let dw = word_size_to_dw(word_size);
-    tr1.set_sdw(dw);
-    tr1.set_ddw(dw);
-    tr1.set_sinc(true);
-    tr1.set_dinc(false);
-    tr1.set_sap(vals::Ap::PORT0);
-    tr1.set_dap(vals::Ap::PORT1);
-    tr1
-}
-
-fn build_tr2(request: dma::Request) -> regs::ChTr2 {
-    let mut tr2 = regs::ChTr2(0);
-    tr2.set_reqsel(request);
-    tr2.set_dreq(vals::Dreq::DESTINATION_PERIPHERAL);
-    tr2.set_tcem(vals::Tcem::LAST_LINKED_LIST_ITEM);
-    tr2
-}
-
-fn build_br1(byte_len: u16) -> regs::ChBr1 {
-    let mut br1 = regs::ChBr1(0);
-    br1.set_bndt(byte_len);
-    br1
-}
-
-/// Pre-compute the CR register value (without EN bit).
-fn build_cr() -> u32 {
-    let mut cr = regs::ChCr(0);
-    cr.set_prio(vals::Prio::HIGH);
-    cr.set_tcie(true);
-    cr.set_useie(true);
-    cr.set_uleie(true);
-    cr.set_dteie(true);
-    cr.0
-}
-
-// ---------------------------------------------------------------------------
 // Item chain construction
 // ---------------------------------------------------------------------------
-
-/// LBAR value (upper 16 bits of item array base address).
-fn item_lbar(items: &[LinearItem]) -> u16 {
-    ((items.as_ptr() as u32) >> 16) as u16
-}
 
 /// Lower 16-bit offset address of an item within its 64 KB region.
 #[allow(clippy::cast_possible_truncation)]
 fn item_offset(item: &LinearItem) -> u16 {
     core::ptr::from_ref(item) as u32 as u16
-}
-
-/// Build a `ChLlr` value that links to the item at the given 16-bit
-/// offset, with all 6 linear update flags set.
-fn build_llr_link(next_offset: u16) -> regs::ChLlr {
-    let mut llr = regs::ChLlr(0);
-    llr.set_ut1(true);
-    llr.set_ut2(true);
-    llr.set_ub1(true);
-    llr.set_usa(true);
-    llr.set_uda(true);
-    llr.set_ull(true);
-    llr.set_la(next_offset >> 2);
-    llr
-}
-
-/// Build the initial LLR register value that causes the GPDMA to
-/// fetch `items[0]` on first enable.
-fn initial_llr(items: &[LinearItem]) -> regs::ChLlr {
-    build_llr_link(item_offset(&items[0]))
 }
 
 /// Populate the linked-list chain with duplicated descriptors for
@@ -185,38 +114,43 @@ pub fn build_item_chain(
         "GPDMA descriptor chain spans a 64 KB boundary"
     );
 
-    let tr1 = build_tr1(word_size);
-    let tr2 = build_tr2(request);
-    let dar = odr_addr as u32;
-
     let mut idx = 0;
     for (plane, &(ptr, len)) in planes.iter().enumerate().take(plane_count) {
-        #[allow(clippy::cast_possible_truncation)]
-        let byte_len = len as u16;
-        debug_assert!(
-            usize::from(byte_len) == len,
-            "bitplane exceeds 64 KB BNDT limit"
-        );
-
-        let br1 = build_br1(byte_len);
-        let sar = ptr as u32;
         let reps = 1usize << (plane_count - 1 - plane);
 
         for _ in 0..reps {
-            let llr = if idx + 1 < total {
-                build_llr_link(item_offset(&items[idx + 1]))
-            } else {
-                regs::ChLlr(0)
+            // Create a write transfer item (memory → peripheral/ODR)
+            // using the embassy-stm32 high-level API.
+            let mut item = match word_size {
+                WordSize::OneByte => {
+                    let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
+                    unsafe { LinearItem::new_write(request, buf, odr_addr) }
+                }
+                WordSize::TwoBytes => {
+                    debug_assert!(
+                        ptr.align_offset(core::mem::align_of::<u16>()) == 0,
+                        "DMA source buffer is not u16-aligned"
+                    );
+                    debug_assert!(
+                        len.is_multiple_of(2),
+                        "DMA buffer length is not a multiple of 2"
+                    );
+                    let buf = unsafe { core::slice::from_raw_parts(ptr.cast::<u16>(), len / 2) };
+                    unsafe { LinearItem::new_write(request, buf, odr_addr.cast::<u16>()) }
+                }
+                _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
             };
 
-            items[idx] = LinearItem {
-                tr1,
-                tr2,
-                br1,
-                sar,
-                dar,
-                llr,
-            };
+            // Set TCEM so TC fires only at the last linked-list item.
+            item.set_transfer_complete_mode(TransferCompleteMode::LastLinkedListItem);
+
+            // Link to next item if not the last.
+            if idx + 1 < total {
+                let next_offset = item_offset(&items[idx + 1]);
+                item.link_to(next_offset);
+            }
+
+            items[idx] = item;
             idx += 1;
         }
     }
@@ -246,46 +180,12 @@ pub fn update_item_sources(
 }
 
 // ---------------------------------------------------------------------------
-// GPDMA channel bootstrap / restart (PAC-level)
-// ---------------------------------------------------------------------------
-
-/// Configure and start the GPDMA channel for the first linked-list pass.
-#[doc(hidden)]
-pub fn start_gpdma_chain(gpdma: Gpdma, ch_num: usize, items: &[LinearItem; MAX_DESCRIPTORS]) {
-    let ch = gpdma.ch(ch_num);
-    let cr_val = build_cr();
-
-    ch.cr().write(|w| w.set_reset(true));
-    ch.fcr().write(|w| {
-        w.set_tcf(true);
-        w.set_htf(true);
-        w.set_suspf(true);
-        w.set_tof(true);
-        w.set_ulef(true);
-        w.set_usef(true);
-        w.set_dtef(true);
-    });
-    ch.lbar().write(|w| w.set_lba(item_lbar(items)));
-    ch.br1().write(|w| w.set_bndt(0));
-    ch.llr().write_value(initial_llr(items));
-    ch.tr3().write(|_| {});
-    ch.cr().write_value(regs::ChCr(cr_val));
-    ch.cr().modify(|w| w.set_en(true));
-}
-
-/// Reset and restart the GPDMA linked-list chain from item[0].
-///
-/// Called from the ISR after frame-boundary processing.
-#[doc(hidden)]
-pub fn restart_gpdma_chain(gpdma: Gpdma, ch_num: usize, items: &[LinearItem; MAX_DESCRIPTORS]) {
-    start_gpdma_chain(gpdma, ch_num, items);
-}
-
-// ---------------------------------------------------------------------------
 // GpdmaIsrCore — frame-boundary state (library code, no generics)
 // ---------------------------------------------------------------------------
 
 struct GpdmaIsrCoreState {
+    channel: Channel<'static>,
+    options: TransferOptions,
     planes: PlaneInfo,
     plane_count: usize,
     current_fb_ptr: *const (),
@@ -295,6 +195,7 @@ struct GpdmaIsrCoreState {
 }
 
 // SAFETY: Raw pointers target static framebuffer allocations or are null.
+// Channel<'static> is Send (contains only a DmaChannel enum + PhantomData).
 // All access is guarded by the critical-section Mutex.
 unsafe impl Send for GpdmaIsrCoreState {}
 
@@ -357,6 +258,23 @@ impl GpdmaIsrCore {
         }
     }
 
+    /// Reset and restart the GPDMA linked-list chain from item[0].
+    ///
+    /// Called from the ISR after frame-boundary processing.
+    #[doc(hidden)]
+    pub fn restart_chain(
+        &self,
+        cs: critical_section::CriticalSection,
+        table: &Table<MAX_DESCRIPTORS>,
+    ) {
+        let borrow = self.state.borrow_ref(cs);
+        let Some(state) = borrow.as_ref() else { return };
+        // SAFETY: called from the ISR inside a critical section — no other
+        // code is concurrently accessing the channel registers. The table
+        // is a `'static` allocation and remains valid for the transfer.
+        unsafe { state.channel.restart_linked_list(table, state.options) };
+    }
+
     /// Returns the number of complete BCM frames rendered.
     pub fn frame_count(&self) -> u32 {
         self.frame_count.load(Ordering::Relaxed)
@@ -417,11 +335,15 @@ impl GpdmaIsrCore {
     pub fn init_state(
         &self,
         cs: critical_section::CriticalSection,
+        channel: Channel<'static>,
+        options: TransferOptions,
         planes: PlaneInfo,
         plane_count: usize,
         fb_ptr: *const (),
     ) {
         *self.state.borrow_ref_mut(cs) = Some(GpdmaIsrCoreState {
+            channel,
+            options,
             planes,
             plane_count,
             current_fb_ptr: fb_ptr,
@@ -465,15 +387,13 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         tim: Peri<'d, T>,
         clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
         dma_ch: Peri<'d, D>,
-        _dma_irq: impl Binding<D::Interrupt, dma::InterruptHandler<D>> + 'd,
+        dma_irq: impl Binding<D::Interrupt, dma::InterruptHandler<D>> + 'd,
         pins: P,
         config: Config,
         fb: &'static mut FB,
         core: &'static GpdmaIsrCore,
         timer_slot: &'static TimerSlot<T>,
-        items: &'static mut [LinearItem; MAX_DESCRIPTORS],
-        gpdma: Gpdma,
-        ch_num: usize,
+        items: &'static mut Table<MAX_DESCRIPTORS>,
     ) -> Self
     where
         FB: FrameBuffer<Word = P::Word>,
@@ -503,20 +423,29 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         timer.enable_update_dma(true);
 
         let request = <D as UpDma<T>>::request(&*dma_ch);
-        let _claimed = ManuallyDrop::new(dma_ch);
+        let channel = Channel::new(dma_ch, dma_irq);
 
         // --- Build the linked-list descriptor chain ---
         let (planes, plane_count) = planes_from_fb(fb);
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
 
         build_item_chain(
-            items,
+            &mut items.items,
             &planes,
             plane_count,
             odr_addr,
             P::DMA_WORD_SIZE,
             request,
         );
+
+        // Transfer options for linked-list configuration.
+        // TCEM on individual items is set in build_item_chain; the
+        // transfer_complete_mode here only affects the initial channel
+        // TR2 which is overwritten by the first LLI.
+        let mut options = TransferOptions::default();
+        options.priority = Priority::VeryHigh;
+        options.complete_transfer_ir = true;
+        options.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
 
         critical_section::with(|cs| {
             // SAFETY: Timer<'d> → Timer<'static>. See dma.rs for rationale.
@@ -525,9 +454,21 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
             });
             *timer_slot.borrow_ref_mut(cs) = Some(timer_static);
 
-            core.init_state(cs, planes, plane_count, fb_ptr);
+            // SAFETY: Channel<'d> → Channel<'static>. The DMA channel
+            // peripheral is consumed by this driver and will never be
+            // released. Channel internally stores a DmaChannel enum +
+            // PhantomData lifetime marker — no actual borrow. Same
+            // embassy-stm32 version coupling as the Timer transmute above.
+            let mut channel: Channel<'static> =
+                unsafe { core::mem::transmute::<Channel<'_>, Channel<'static>>(channel) };
 
-            start_gpdma_chain(gpdma, ch_num, items);
+            // Start the linked-list transfer. The returned LinkedListTransfer
+            // is forgotten to prevent its Drop impl from resetting the channel.
+            let transfer = unsafe { channel.linked_list(items, options) };
+            core::mem::forget(transfer);
+
+            core.init_state(cs, channel, options, planes, plane_count, fb_ptr);
+
             timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
 
@@ -563,173 +504,11 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
 }
 
 // ---------------------------------------------------------------------------
-// Helper macros — derive PAC instance / channel number from a channel ident
-// ---------------------------------------------------------------------------
-
-/// Resolve a GPDMA channel identifier (e.g. `GPDMA1_CH12`) to its PAC
-/// register block.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __gpdma_ch_pac {
-    (GPDMA1_CH0) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH1) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH2) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH3) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH4) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH5) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH6) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH7) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH8) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH9) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH10) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH11) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH12) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH13) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH14) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA1_CH15) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA1
-    };
-    (GPDMA2_CH0) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH1) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH2) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH3) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH4) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH5) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH6) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-    (GPDMA2_CH7) => {
-        $crate::__macro_support::embassy_stm32::pac::GPDMA2
-    };
-}
-
-/// Resolve a GPDMA channel identifier (e.g. `GPDMA1_CH12`) to its
-/// channel number within the GPDMA instance.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __gpdma_ch_num {
-    (GPDMA1_CH0) => {
-        0usize
-    };
-    (GPDMA1_CH1) => {
-        1usize
-    };
-    (GPDMA1_CH2) => {
-        2usize
-    };
-    (GPDMA1_CH3) => {
-        3usize
-    };
-    (GPDMA1_CH4) => {
-        4usize
-    };
-    (GPDMA1_CH5) => {
-        5usize
-    };
-    (GPDMA1_CH6) => {
-        6usize
-    };
-    (GPDMA1_CH7) => {
-        7usize
-    };
-    (GPDMA1_CH8) => {
-        8usize
-    };
-    (GPDMA1_CH9) => {
-        9usize
-    };
-    (GPDMA1_CH10) => {
-        10usize
-    };
-    (GPDMA1_CH11) => {
-        11usize
-    };
-    (GPDMA1_CH12) => {
-        12usize
-    };
-    (GPDMA1_CH13) => {
-        13usize
-    };
-    (GPDMA1_CH14) => {
-        14usize
-    };
-    (GPDMA1_CH15) => {
-        15usize
-    };
-    (GPDMA2_CH0) => {
-        0usize
-    };
-    (GPDMA2_CH1) => {
-        1usize
-    };
-    (GPDMA2_CH2) => {
-        2usize
-    };
-    (GPDMA2_CH3) => {
-        3usize
-    };
-    (GPDMA2_CH4) => {
-        4usize
-    };
-    (GPDMA2_CH5) => {
-        5usize
-    };
-    (GPDMA2_CH6) => {
-        6usize
-    };
-    (GPDMA2_CH7) => {
-        7usize
-    };
-}
-
-// ---------------------------------------------------------------------------
 // hub75_gpdma_define! macro
 // ---------------------------------------------------------------------------
 
 /// Define a GPDMA-backed HUB75 driver instance with its own timer
-/// static, descriptor array, and ISR handler.
+/// static, descriptor table, and ISR handler.
 ///
 /// Each invocation creates a public module containing:
 /// - `Hub75GpdmaHandler` — the GPDMA interrupt handler for `bind_interrupts!`
@@ -769,7 +548,7 @@ macro_rules! hub75_gpdma_define {
         #[allow(non_snake_case)]
         pub mod $mod_name {
             use $crate::__macro_support::critical_section;
-            use $crate::__macro_support::embassy_stm32::dma::{self, ChannelInstance};
+            use $crate::__macro_support::embassy_stm32::dma::{self, ChannelInstance, Table};
             use $crate::__macro_support::embassy_stm32::interrupt::typelevel::{Binding, Handler};
             use $crate::__macro_support::embassy_stm32::timer::{Ch1, TimerPin, UpDma};
             use $crate::__macro_support::embassy_stm32::Peri;
@@ -783,8 +562,9 @@ macro_rules! hub75_gpdma_define {
 
             static CORE: GpdmaIsrCore = GpdmaIsrCore::new();
 
-            static mut ITEMS: [$crate::gpdma::LinearItem; $crate::gpdma::MAX_DESCRIPTORS] =
-                [$crate::gpdma::zeroed_linear_item(); $crate::gpdma::MAX_DESCRIPTORS];
+            static mut ITEMS: Table<{ $crate::gpdma::MAX_DESCRIPTORS }> = Table {
+                items: [$crate::gpdma::zeroed_linear_item(); $crate::gpdma::MAX_DESCRIPTORS]
+            };
 
             /// GPDMA interrupt handler for this HUB75 instance.
             pub struct Hub75GpdmaHandler;
@@ -804,13 +584,9 @@ macro_rules! hub75_gpdma_define {
                         // SAFETY: ITEMS is only mutated here (in this ISR,
                         // inside a critical section) and during init (before
                         // interrupts are enabled for this channel).
-                        CORE.on_chain_complete(cs, unsafe { &mut ITEMS });
+                        CORE.on_chain_complete(cs, unsafe { &mut ITEMS.items });
 
-                        gpdma_driver::restart_gpdma_chain(
-                            $crate::__gpdma_ch_pac!($dma_ch),
-                            $crate::__gpdma_ch_num!($dma_ch),
-                            unsafe { &ITEMS },
-                        );
+                        CORE.restart_chain(cs, unsafe { &ITEMS });
 
                         timer.start();
                     });
@@ -855,8 +631,6 @@ macro_rules! hub75_gpdma_define {
                     &TIMER,
                     // SAFETY: init is called once before the ISR is active.
                     unsafe { &mut ITEMS },
-                    $crate::__gpdma_ch_pac!($dma_ch),
-                    $crate::__gpdma_ch_num!($dma_ch),
                 )
             }
         }
