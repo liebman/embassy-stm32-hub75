@@ -48,9 +48,9 @@ heapless = "0.9.3"
 # embassy-futures = { path = "../../../embassy/embassy-futures" }
 
 
-embassy-stm32 = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
-embassy-time-driver = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
-embassy-time = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
-embassy-sync = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
-embassy-executor = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
-embassy-futures = { git = "https://github.com/liebman/embassy.git", branch = "gpdma-api" }
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", rev = "87052e460ef99bafd3b8ff7d1903822df025b54a" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "87052e460ef99bafd3b8ff7d1903822df025b54a" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "87052e460ef99bafd3b8ff7d1903822df025b54a" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "87052e460ef99bafd3b8ff7d1903822df025b54a" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "87052e460ef99bafd3b8ff7d1903822df025b54a" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "87052e460ef99bafd3b8ff7d1903822df025b54a" }

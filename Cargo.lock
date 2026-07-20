@@ -215,7 +215,7 @@ dependencies = [
 [[package]]
 name = "embassy-embedded-hal"
 version = "0.6.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "defmt 1.1.0",
  "embassy-futures",
@@ -232,12 +232,12 @@ dependencies = [
 [[package]]
 name = "embassy-futures"
 version = "0.1.2"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 
 [[package]]
 name = "embassy-hal-internal"
 version = "0.5.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -248,7 +248,7 @@ dependencies = [
 [[package]]
 name = "embassy-net-driver"
 version = "0.2.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "defmt 1.1.0",
 ]
@@ -256,7 +256,7 @@ dependencies = [
 [[package]]
 name = "embassy-stm32"
 version = "0.6.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "aligned",
  "bit_field",
@@ -320,7 +320,7 @@ dependencies = [
 [[package]]
 name = "embassy-sync"
 version = "0.8.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -334,7 +334,7 @@ dependencies = [
 [[package]]
 name = "embassy-time"
 version = "0.5.1"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -350,7 +350,7 @@ dependencies = [
 [[package]]
 name = "embassy-time-driver"
 version = "0.2.2"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "document-features",
 ]
@@ -358,7 +358,7 @@ dependencies = [
 [[package]]
 name = "embassy-usb-driver"
 version = "0.2.2"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "defmt 1.1.0",
  "embedded-io-async 0.6.1",
@@ -368,7 +368,7 @@ dependencies = [
 [[package]]
 name = "embassy-usb-synopsys-otg"
 version = "0.4.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
 dependencies = [
  "critical-section",
  "defmt 1.1.0",
@@ -888,4 +888,4 @@ dependencies = [
 [[patch.unused]]
 name = "embassy-executor"
 version = "0.10.0"
-source = "git+https://github.com/liebman/embassy.git?branch=gpdma-api#d12f77039afbdc87880566130c3e44cbf7dd4182"
+source = "git+https://github.com/embassy-rs/embassy.git?rev=87052e460ef99bafd3b8ff7d1903822df025b54a#87052e460ef99bafd3b8ff7d1903822df025b54a"
