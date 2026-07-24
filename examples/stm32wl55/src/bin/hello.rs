@@ -76,8 +76,8 @@ async fn main(_spawner: Spawner) {
     info!("Starting main");
     info!("Initializing primary");
     let mut config = embassy_stm32::Config::default();
-    config.rcc.msi = Some(MSIRange::RANGE48M);
-    config.rcc.sys = Sysclk::MSI;
+    config.rcc.msi = Some(MSIRange::Range48m);
+    config.rcc.sys = Sysclk::Msi;
     let p = embassy_stm32::init_primary(config, &SHARED_DATA);
     info!("Primary initialized (48 MHz MSI)");
 

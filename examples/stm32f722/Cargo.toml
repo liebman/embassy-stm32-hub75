@@ -42,6 +42,20 @@ numtoa = "1.0.0"
 heapless = "0.9.3"
 
 
-# [patch.crates-io]
+[patch.crates-io]
 
 # hub75-framebuffer = { path = "../../../hub75-framebuffer" }
+
+# embassy-stm32 = { path = "../../../embassy/embassy-stm32" }
+# embassy-time-driver = { path = "../../../embassy/embassy-time-driver" }
+# embassy-time = { path = "../../../embassy/embassy-time" }
+# embassy-sync = { path = "../../../embassy/embassy-sync" }
+# embassy-executor = { path = "../../../embassy/embassy-executor" }
+# embassy-futures = { path = "../../../embassy/embassy-futures" }
+
+embassy-stm32 = { git = "https://github.com/liebman/embassy.git", branch = "gpdma2d" }
+embassy-time-driver = { git = "https://github.com/liebman/embassy.git", branch = "gpdma2d" }
+embassy-time = { git = "https://github.com/liebman/embassy.git", branch = "gpdma2d" }
+embassy-sync = { git = "https://github.com/liebman/embassy.git", branch = "gpdma2d" }
+embassy-executor = { git = "https://github.com/liebman/embassy.git", branch = "gpdma2d" }
+embassy-futures = { git = "https://github.com/liebman/embassy.git", branch = "gpdma2d" }

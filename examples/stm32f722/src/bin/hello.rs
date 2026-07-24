@@ -67,19 +67,19 @@ static FB1: StaticCell<FBType> = StaticCell::new();
 async fn main(_spawner: Spawner) {
     info!("Starting main");
     let mut config = embassy_stm32::Config::default();
-    config.rcc.sys = Sysclk::PLL1_P;
+    config.rcc.sys = Sysclk::Pll1P;
     config.rcc.hsi = true;
-    config.rcc.pll_src = PllSource::HSI;
+    config.rcc.pll_src = PllSource::Hsi;
     config.rcc.pll = Some(Pll {
-        prediv: PllPreDiv::DIV8,
-        mul: PllMul::MUL216,
-        divp: Some(PllPDiv::DIV2),
-        divq: Some(PllQDiv::DIV9),
-        divr: Some(PllRDiv::DIV2),
+        prediv: PllPreDiv::Div8,
+        mul: PllMul::Mul216,
+        divp: Some(PllPDiv::Div2),
+        divq: Some(PllQDiv::Div9),
+        divr: Some(PllRDiv::Div2),
     });
-    config.rcc.ahb_pre = AHBPrescaler::DIV1;
-    config.rcc.apb1_pre = APBPrescaler::DIV4;
-    config.rcc.apb2_pre = APBPrescaler::DIV2;
+    config.rcc.ahb_pre = AHBPrescaler::Div1;
+    config.rcc.apb1_pre = APBPrescaler::Div4;
+    config.rcc.apb2_pre = APBPrescaler::Div2;
 
     let p = embassy_stm32::init(config);
 

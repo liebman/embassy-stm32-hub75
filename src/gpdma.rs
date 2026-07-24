@@ -27,9 +27,15 @@ use core::task::{Poll, Waker};
 use critical_section::Mutex;
 #[doc(hidden)]
 pub use embassy_stm32::dma::linked_list::LinearItem;
+#[doc(hidden)]
+pub use embassy_stm32::dma::linked_list::LinearItemConfig;
+#[doc(hidden)]
+pub use embassy_stm32::dma::linked_list::LinkedListItem;
+#[doc(hidden)]
+pub use embassy_stm32::dma::two_d::TwoDItem;
 use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::dma::{
-    self, Channel, ChannelInstance, Priority, Table, TransferCompleteMode, TransferOptions,
+    self, Channel, ChannelInstance, Item, Priority, Table, TransferCompleteMode, TransferOptions,
 };
 use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
@@ -39,7 +45,9 @@ use embassy_stm32::timer::simple_pwm::PwmPin;
 use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
-use crate::bcm::{planes_from_fb, PlaneInfo, MAX_PLANES};
+#[doc(hidden)]
+pub use crate::bcm::MAX_PLANES;
+use crate::bcm::{planes_from_fb, PlaneInfo};
 use crate::framebuffer::FrameBuffer;
 use crate::{Config, Hub75Error, Hub75Pins};
 
@@ -56,11 +64,13 @@ pub const MAX_DESCRIPTORS: usize = (1 << MAX_PLANES) - 1;
 #[must_use]
 pub const fn zeroed_linear_item() -> LinearItem {
     LinearItem {
-        tr1: regs::ChTr1(0),
-        tr2: regs::ChTr2(0),
-        br1: regs::ChBr1(0),
-        sar: 0,
-        dar: 0,
+        item: Item {
+            tr1: regs::ChTr1(0),
+            tr2: regs::ChTr2(0),
+            br1: regs::ChBr1(0),
+            sar: 0,
+            dar: 0,
+        },
         llr: regs::ChLlr(0),
     }
 }
@@ -114,6 +124,9 @@ pub fn build_item_chain(
         "GPDMA descriptor chain spans a 64 KB boundary"
     );
 
+    let mut config = LinearItemConfig::default();
+    config.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
+
     let mut idx = 0;
     for (plane, &(ptr, len)) in planes.iter().enumerate().take(plane_count) {
         let reps = 1usize << (plane_count - 1 - plane);
@@ -124,7 +137,7 @@ pub fn build_item_chain(
             let mut item = match word_size {
                 WordSize::OneByte => {
                     let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
-                    unsafe { LinearItem::new_write(request, buf, odr_addr) }
+                    unsafe { LinearItem::new_write(request, buf, odr_addr, config) }
                 }
                 WordSize::TwoBytes => {
                     debug_assert!(
@@ -136,13 +149,10 @@ pub fn build_item_chain(
                         "DMA buffer length is not a multiple of 2"
                     );
                     let buf = unsafe { core::slice::from_raw_parts(ptr.cast::<u16>(), len / 2) };
-                    unsafe { LinearItem::new_write(request, buf, odr_addr.cast::<u16>()) }
+                    unsafe { LinearItem::new_write(request, buf, odr_addr.cast::<u16>(), config) }
                 }
                 _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
             };
-
-            // Set TCEM so TC fires only at the last linked-list item.
-            item.set_transfer_complete_mode(TransferCompleteMode::LastLinkedListItem);
 
             // Link to next item if not the last.
             if idx + 1 < total {
@@ -173,9 +183,21 @@ pub fn update_item_sources(
         let reps = 1usize << (plane_count - 1 - plane);
         let sar = ptr as u32;
         for _ in 0..reps {
-            items[idx].sar = sar;
+            items[idx].item.sar = sar;
             idx += 1;
         }
+    }
+}
+
+/// Patch source-address fields on 2D items (one item per plane).
+#[doc(hidden)]
+pub fn update_item_sources_2d(
+    items: &mut [TwoDItem; MAX_PLANES],
+    planes: &PlaneInfo,
+    plane_count: usize,
+) {
+    for (i, &(ptr, _)) in planes.iter().enumerate().take(plane_count) {
+        items[i].item.sar = ptr as u32;
     }
 }
 
@@ -265,13 +287,59 @@ impl GpdmaIsrCore {
     pub fn restart_chain(
         &self,
         cs: critical_section::CriticalSection,
-        table: &Table<MAX_DESCRIPTORS>,
+        table: &Table<LinearItem, MAX_DESCRIPTORS>,
     ) {
         let borrow = self.state.borrow_ref(cs);
         let Some(state) = borrow.as_ref() else { return };
         // SAFETY: called from the ISR inside a critical section — no other
         // code is concurrently accessing the channel registers. The table
         // is a `'static` allocation and remains valid for the transfer.
+        unsafe { state.channel.restart_linked_list(table, state.options) };
+    }
+
+    /// Called from the ISR at each frame boundary for 2D transfers.
+    ///
+    /// Same swap logic as [`on_chain_complete`](Self::on_chain_complete),
+    /// but patches `TwoDItem` SAR fields.
+    ///
+    /// # Safety
+    /// Must only be called from within a critical section, from the
+    /// GPDMA transfer-complete ISR. `items` must point to the static
+    /// 2D item array for this instance.
+    #[doc(hidden)]
+    pub unsafe fn on_chain_complete_2d(
+        &self,
+        cs: critical_section::CriticalSection,
+        items: &mut [TwoDItem; MAX_PLANES],
+    ) {
+        let mut borrow = self.state.borrow_ref_mut(cs);
+        let Some(state) = borrow.as_mut() else { return };
+
+        self.frame_count.fetch_add(1, Ordering::Relaxed);
+
+        if let Some(pending) = state.pending_planes.take() {
+            state.returned_fb_ptr = state.current_fb_ptr;
+            state.current_fb_ptr = state.pending_fb_ptr;
+            state.pending_fb_ptr = core::ptr::null();
+            state.planes = pending;
+
+            update_item_sources_2d(items, &pending, state.plane_count);
+
+            self.signal_swap_done(cs);
+        }
+    }
+
+    /// Reset and restart a 2D GPDMA linked-list chain from item[0].
+    ///
+    /// Called from the ISR after frame-boundary processing on 2D instances.
+    #[doc(hidden)]
+    pub fn restart_chain_2d(
+        &self,
+        cs: critical_section::CriticalSection,
+        table: &Table<TwoDItem, { MAX_PLANES }>,
+    ) {
+        let borrow = self.state.borrow_ref(cs);
+        let Some(state) = borrow.as_ref() else { return };
         unsafe { state.channel.restart_linked_list(table, state.options) };
     }
 
@@ -393,7 +461,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         fb: &'static mut FB,
         core: &'static GpdmaIsrCore,
         timer_slot: &'static TimerSlot<T>,
-        items: &'static mut Table<MAX_DESCRIPTORS>,
+        items: &'static mut Table<LinearItem, MAX_DESCRIPTORS>,
     ) -> Self
     where
         FB: FrameBuffer<Word = P::Word>,
@@ -549,6 +617,7 @@ macro_rules! hub75_gpdma_define {
         pub mod $mod_name {
             use $crate::__macro_support::critical_section;
             use $crate::__macro_support::embassy_stm32::dma::{self, ChannelInstance, Table};
+            use $crate::__macro_support::embassy_stm32::dma::linked_list::LinearItem;
             use $crate::__macro_support::embassy_stm32::interrupt::typelevel::{Binding, Handler};
             use $crate::__macro_support::embassy_stm32::timer::{Ch1, TimerPin, UpDma};
             use $crate::__macro_support::embassy_stm32::Peri;
@@ -562,8 +631,8 @@ macro_rules! hub75_gpdma_define {
 
             static CORE: GpdmaIsrCore = GpdmaIsrCore::new();
 
-            static mut ITEMS: Table<{ $crate::gpdma::MAX_DESCRIPTORS }> = Table {
-                items: [$crate::gpdma::zeroed_linear_item(); $crate::gpdma::MAX_DESCRIPTORS]
+            static mut ITEMS: Table<LinearItem, { $crate::gpdma::MAX_DESCRIPTORS }> = Table {
+                items: [$crate::gpdma::zeroed_linear_item(); $crate::gpdma::MAX_DESCRIPTORS],
             };
 
             /// GPDMA interrupt handler for this HUB75 instance.

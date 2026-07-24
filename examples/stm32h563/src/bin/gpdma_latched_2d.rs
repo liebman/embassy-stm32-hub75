@@ -1,42 +1,43 @@
-//! Example: HUB75 latched panel on PD0-PD7 with TIM1 CLK on PE9.
+//! Example: HUB75 8-bit latched panel driven by 2D GPDMA linked-list on
+//! Nucleo-H563ZI.
 //!
-//! Draws gradient bars + FPS counters on a 64x64 panel using bitplane latched
-//! framebuffer with ISR-driven continuous rendering and double buffering.
+//! BCM weighting is achieved via the hardware block-repeat count on each
+//! `TwoDItem` descriptor. Only `plane_count` items are needed (one per
+//! bitplane), compared to 2^N - 1 items in the linear linked-list backend.
 //!
-//! Pin wiring:
-//!   PD0:  R1      PD4: G2
-//!   PD1:  G1      PD5: B2
-//!   PD2:  B1      PD6: LATCH
-//!   PD3:  R2      PD7: BLANK/OE
-//!   PE9:  CLK (TIM1)
+//! Requires a 2D-capable GPDMA channel (channels 4-7 on H563).
 //!
-//! DMA2 Channel 5 is used for framebuffer → GPIO transfers, triggered
-//! by TIM1 update events. The ISR-driven refresh loop runs autonomously.
+//! Pin wiring (Port D, lower byte):
+//!   PD0: R1      PD4: G2
+//!   PD1: G1      PD5: B2
+//!   PD2: B1      PD6: LATCH
+//!   PD3: R2      PD7: BLANK/OE
+//!   PE9: CLK (TIM1 CH1)
+//!
+//! GPDMA1 Channel 7 (2D-capable) transfers framebuffer → GPIO, paced by
+//! TIM1 update events.
 
 #![no_std]
 #![no_main]
 
 use core::fmt;
-use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::rcc::{
-    AHBPrescaler, APBPrescaler, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllRDiv, PllSource,
-    Sysclk,
+    AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk,
+    VoltageScale,
 };
 use embassy_stm32::{bind_interrupts, dma, peripherals};
-use embassy_time::Timer;
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::geometry::Point;
 use embedded_graphics::mono_font::ascii::FONT_5X7;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::RgbColor;
-use embedded_graphics::text::Alignment;
-use embedded_graphics::text::Text;
+use embedded_graphics::text::{Alignment, Text};
 use embedded_graphics::Drawable;
 use heapless::String;
 use panic_probe as _;
@@ -44,7 +45,7 @@ use static_cell::StaticCell;
 
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
-use embassy_stm32_hub75::{hub75_define, Color, Config, Hertz, Hub75Pins8};
+use embassy_stm32_hub75::{hub75_gpdma_2d_define, Color, Config, Hertz, Hub75Pins8};
 
 const ROWS: usize = 64;
 const COLS: usize = 64;
@@ -58,16 +59,12 @@ const NBARS: i32 = ROWS as i32 / 8;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
-hub75_define!(
-    hub75,
-    embassy_stm32::peripherals::TIM1,
-    embassy_stm32::peripherals::DMA2_CH5
-);
+hub75_gpdma_2d_define!(hub75, embassy_stm32::peripherals::TIM1, GPDMA1_CH7);
 
 bind_interrupts!(struct Irqs {
-    DMA2_STREAM5 =>
-        dma::InterruptHandler<peripherals::DMA2_CH5>,
-        hub75::Hub75DmaHandler;
+    GPDMA1_CHANNEL7 =>
+        dma::InterruptHandler<peripherals::GPDMA1_CH7>,
+        hub75::Hub75Gpdma2dHandler;
 });
 
 static FB0: StaticCell<FBType> = StaticCell::new();
@@ -77,8 +74,11 @@ static RENDER_RATE: AtomicU32 = AtomicU32::new(0);
 static SIMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[embassy_executor::task]
-async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static mut FBType) {
-    info!("display_task: starting!");
+async fn display_task(
+    mut hub75: hub75::Hub75Gpdma2d<'static, FBType>,
+    mut fb: &'static mut FBType,
+) {
+    info!("display_task: starting (2D DMA)!");
     let fps_style = MonoTextStyleBuilder::new()
         .font(&FONT_5X7)
         .text_color(Color::YELLOW)
@@ -110,10 +110,14 @@ async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static
 
         let mut buffer: String<64> = String::new();
 
-        fmt::write(&mut buffer, format_args!("Refresh: {:4}", refresh_rate)).unwrap();
+        fmt::write(
+            &mut buffer,
+            format_args!("Simple: {:5}", SIMPLE_COUNTER.load(Ordering::Relaxed)),
+        )
+        .unwrap();
         Text::with_alignment(
             buffer.as_str(),
-            Point::new(0, LINE3),
+            Point::new(0, LINE1),
             fps_style,
             Alignment::Left,
         )
@@ -136,21 +140,17 @@ async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static
         .unwrap();
 
         buffer.clear();
-        fmt::write(
-            &mut buffer,
-            format_args!("Simple: {:5}", SIMPLE_COUNTER.load(Ordering::Relaxed)),
-        )
-        .unwrap();
+        fmt::write(&mut buffer, format_args!("Refresh: {:4}", refresh_rate)).unwrap();
         Text::with_alignment(
             buffer.as_str(),
-            Point::new(0, LINE1),
+            Point::new(0, LINE3),
             fps_style,
             Alignment::Left,
         )
         .draw(fb)
         .unwrap();
 
-        fb = hub75.swap(fb).await.expect("DMA transfer failed");
+        fb = hub75.swap(fb).await.expect("swap failed");
 
         render_count += 1;
         const FPS_INTERVAL: Duration = Duration::from_secs(1);
@@ -167,21 +167,29 @@ async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Starting main");
+    info!("Starting main — GPDMA 2D linked-list latched demo (H563)");
+
     let mut config = embassy_stm32::Config::default();
+
+    // HSE (8 MHz on Nucleo-H563ZI) → PLL → 250 MHz SYSCLK
+    config.rcc.hse = Some(Hse {
+        freq: Hertz(8_000_000),
+        mode: HseMode::BypassDigital,
+    });
     config.rcc.sys = Sysclk::Pll1P;
-    config.rcc.hsi = true;
-    config.rcc.pll_src = PllSource::Hsi;
-    config.rcc.pll = Some(Pll {
-        prediv: PllPreDiv::Div8,
-        mul: PllMul::Mul216,
-        divp: Some(PllPDiv::Div2),
-        divq: Some(PllQDiv::Div9),
-        divr: Some(PllRDiv::Div2),
+    config.rcc.pll1 = Some(Pll {
+        source: PllSource::Hse,
+        prediv: PllPreDiv::Div2,
+        mul: PllMul::from(124),
+        divp: Some(PllDiv::Div2),
+        divq: Some(PllDiv::Div2),
+        divr: Some(PllDiv::Div2),
     });
     config.rcc.ahb_pre = AHBPrescaler::Div1;
-    config.rcc.apb1_pre = APBPrescaler::Div4;
-    config.rcc.apb2_pre = APBPrescaler::Div2;
+    config.rcc.apb1_pre = APBPrescaler::Div1;
+    config.rcc.apb2_pre = APBPrescaler::Div1;
+    config.rcc.apb3_pre = APBPrescaler::Div1;
+    config.rcc.voltage_scale = VoltageScale::Scale0;
 
     let p = embassy_stm32::init(config);
 
@@ -204,17 +212,17 @@ async fn main(spawner: Spawner) {
     let fb0 = FB0.init(FBType::new());
     let fb1 = FB1.init(FBType::new());
 
-    info!("Starting ISR-driven rendering");
+    info!("Starting 2D GPDMA-driven rendering");
     let hub75 = hub75::init(
         p.TIM1,
         p.PE9,
-        p.DMA2_CH5,
+        p.GPDMA1_CH7,
         Irqs,
         pins,
         Config::new().frequency(Hertz(20_000_000)),
         fb0,
     );
-    info!("Hub75 started");
+    info!("Hub75 GPDMA 2D started");
 
     spawner.spawn(display_task(hub75, fb1).unwrap());
 
