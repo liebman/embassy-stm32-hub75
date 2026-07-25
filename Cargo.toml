@@ -31,7 +31,7 @@ embedded-graphics = "0.8.2"
 embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
-hub75-framebuffer = "0.9.0"
+hub75-framebuffer = "0.10.0"
 
 [features]
 default = []
@@ -45,10 +45,16 @@ defmt = [
 skip-black-pixels = ["hub75-framebuffer/skip-black-pixels"]
 invert-oe = ["hub75-framebuffer/invert-oe"]
 tail-closes-latch = ["hub75-framebuffer/tail-closes-latch"]
-blank-delay-1 = ["hub75-framebuffer/blank-delay-1"]
-blank-delay-2 = ["hub75-framebuffer/blank-delay-2"]
-blank-delay-4 = ["hub75-framebuffer/blank-delay-4"]
-blank-delay-8 = ["hub75-framebuffer/blank-delay-8"]
+lead-blank-1 = ["hub75-framebuffer/lead-blank-1"]
+lead-blank-2 = ["hub75-framebuffer/lead-blank-2"]
+lead-blank-4 = ["hub75-framebuffer/lead-blank-4"]
+lead-blank-8 = ["hub75-framebuffer/lead-blank-8"]
+lead-blank-16 = ["hub75-framebuffer/lead-blank-16"]
+trail-blank-1 = ["hub75-framebuffer/trail-blank-1"]
+trail-blank-2 = ["hub75-framebuffer/trail-blank-2"]
+trail-blank-4 = ["hub75-framebuffer/trail-blank-4"]
+trail-blank-8 = ["hub75-framebuffer/trail-blank-8"]
+trail-blank-16 = ["hub75-framebuffer/trail-blank-16"]
 
 # only used for documentation!
 stm32f722 = ["embassy-stm32/stm32f722ze"]
