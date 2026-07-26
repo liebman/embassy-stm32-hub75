@@ -13,32 +13,24 @@
 use core::cell::RefCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Poll, Waker};
 
 use critical_section::Mutex;
 use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
-use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
-use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
-use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
+use embassy_stm32::timer::{Ch1, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
 use crate::bcm::{planes_from_fb, BcmState, PlaneInfo};
 use crate::framebuffer::FrameBuffer;
 use crate::{Config, Hub75Error, Hub75Pins};
 
-// ---------------------------------------------------------------------------
-// Timer slot type alias (used by macro and Hub75::new)
-// ---------------------------------------------------------------------------
-
-/// Type alias for the timer static slot used by `hub75_define!`.
+/// Re-export of [`crate::setup::TimerSlot`] for the `hub75_define!` macro.
 #[doc(hidden)]
-pub type TimerSlot<T> = Mutex<RefCell<Option<ManuallyDrop<Timer<'static, T>>>>>;
-
+pub use crate::setup::TimerSlot;
 // ---------------------------------------------------------------------------
 // IsrCore — type-erased ISR state (library code, no generics)
 // ---------------------------------------------------------------------------
@@ -326,28 +318,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         // insure the framebuffer wordsize matches the pins we are passing at compile time
         FB: FrameBuffer<Word = P::Word>,
     {
-        let odr_addr = pins.configure_and_get_odr(config.gpio_speed).as_ptr();
-
-        let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
-
-        let timer = Timer::new(tim);
-        timer.set_counting_mode(CountingMode::EdgeAlignedUp);
-        timer.set_frequency(config.frequency, RoundTo::Slower);
-        timer.enable_outputs();
-
-        timer.set_output_compare_mode(TimChannel::Ch1, OutputCompareMode::PwmMode2);
-        timer.set_output_compare_preload(TimChannel::Ch1, true);
-        timer.set_autoreload_preload(true);
-
-        let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(
-            TimChannel::Ch1,
-            (u64::from(max) * 4 / 5).try_into().unwrap(),
-        );
-
-        timer.enable_channel(TimChannel::Ch1, true);
-        timer.generate_update_event();
-        timer.enable_update_dma(true);
+        let hw = crate::setup::hardware(tim, clock_pin, pins, &config);
+        let odr_addr = hw.odr_addr;
 
         let dma_request = <D as UpDma<T>>::request(&*dma_ch);
         let channel = Channel::new(dma_ch, dma_irq);
@@ -363,10 +335,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
             // an actual borrow. Wrapped in ManuallyDrop to prevent
             // rcc::disable on drop. This assumption is coupled to the
             // embassy-stm32 version pinned in Cargo.toml.
-            let timer_static: ManuallyDrop<Timer<'static, T>> = ManuallyDrop::new(unsafe {
-                core::mem::transmute::<Timer<'_, T>, Timer<'static, T>>(timer)
-            });
-            *timer_slot.borrow_ref_mut(cs) = Some(timer_static);
+            unsafe { crate::setup::store_timer(hw.timer, timer_slot, cs) };
 
             // SAFETY: Channel<'d> → Channel<'static>. The DMA channel
             // peripheral is consumed by this driver and will never be
@@ -398,7 +367,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         });
 
         Self {
-            _clock_pin: clock_pin,
+            _clock_pin: hw.clock_pin,
             core,
             _fb: PhantomData,
         }

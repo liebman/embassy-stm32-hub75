@@ -102,6 +102,7 @@ pub mod dma;
 pub mod gpdma;
 #[cfg(feature = "gpdma")]
 pub mod gpdma_2d;
+mod setup;
 
 /// Re-exports used by the [`hub75_define!`] macro. Not part of the public API.
 #[doc(hidden)]

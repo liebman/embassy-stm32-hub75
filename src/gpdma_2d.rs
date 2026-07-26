@@ -13,20 +13,16 @@
 //! the [`TwoDChannelInstance`] trait bound).
 
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
 
 use embassy_stm32::dma::linked_list::{LinkedListItem, Table};
 use embassy_stm32::dma::two_d::{TwoDConfig, TwoDItem};
 use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::dma::{
-    self, Channel, ChannelInstance, Item, Priority, TransferCompleteMode, TransferOptions,
-    TwoDChannelInstance,
+    self, Channel, ChannelInstance, Item, TransferCompleteMode, TwoDChannelInstance,
 };
-use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
-use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
-use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
+use embassy_stm32::timer::{Ch1, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
 use crate::bcm::{planes_from_fb, PlaneInfo, MAX_PLANES};
@@ -172,28 +168,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
     where
         FB: FrameBuffer<Word = P::Word>,
     {
-        let odr_addr = pins.configure_and_get_odr(config.gpio_speed).as_ptr();
-
-        let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
-
-        let timer = Timer::new(tim);
-        timer.set_counting_mode(CountingMode::EdgeAlignedUp);
-        timer.set_frequency(config.frequency, RoundTo::Slower);
-        timer.enable_outputs();
-
-        timer.set_output_compare_mode(TimChannel::Ch1, OutputCompareMode::PwmMode2);
-        timer.set_output_compare_preload(TimChannel::Ch1, true);
-        timer.set_autoreload_preload(true);
-
-        let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(
-            TimChannel::Ch1,
-            (u64::from(max) * 4 / 5).try_into().unwrap(),
-        );
-
-        timer.enable_channel(TimChannel::Ch1, true);
-        timer.generate_update_event();
-        timer.enable_update_dma(true);
+        let hw = crate::setup::hardware(tim, clock_pin, pins, &config);
+        let odr_addr = hw.odr_addr;
 
         let request = <D as UpDma<T>>::request(&*dma_ch);
         let channel = Channel::new(dma_ch, dma_irq);
@@ -210,16 +186,11 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
             request,
         );
 
-        let mut options = TransferOptions::default();
-        options.priority = Priority::VeryHigh;
-        options.complete_transfer_ir = true;
-        options.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
+        let options = crate::gpdma::gpdma_transfer_options();
 
         critical_section::with(|cs| {
-            let timer_static: ManuallyDrop<Timer<'static, T>> = ManuallyDrop::new(unsafe {
-                core::mem::transmute::<Timer<'_, T>, Timer<'static, T>>(timer)
-            });
-            *timer_slot.borrow_ref_mut(cs) = Some(timer_static);
+            // SAFETY: Timer<'d> → Timer<'static>. See clock.rs for rationale.
+            unsafe { crate::setup::store_timer(hw.timer, timer_slot, cs) };
 
             let mut channel: Channel<'static> =
                 unsafe { core::mem::transmute::<Channel<'_>, Channel<'static>>(channel) };
@@ -233,7 +204,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
         });
 
         Self {
-            _clock_pin: clock_pin,
+            _clock_pin: hw.clock_pin,
             core,
             _fb: PhantomData,
         }

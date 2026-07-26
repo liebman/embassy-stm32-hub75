@@ -20,7 +20,6 @@
 use core::cell::RefCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Poll, Waker};
 
@@ -37,12 +36,10 @@ use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::dma::{
     self, Channel, ChannelInstance, Item, Priority, Table, TransferCompleteMode, TransferOptions,
 };
-use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::pac::gpdma::regs;
-use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
-use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
+use embassy_stm32::timer::{Ch1, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
 #[doc(hidden)]
@@ -51,9 +48,9 @@ use crate::bcm::{planes_from_fb, PlaneInfo};
 use crate::framebuffer::FrameBuffer;
 use crate::{Config, Hub75Error, Hub75Pins};
 
-/// Type alias for the timer static slot used by `hub75_gpdma_define!`.
+/// Re-export of [`crate::setup::TimerSlot`] for the `hub75_gpdma_define!` macro.
 #[doc(hidden)]
-pub type TimerSlot<T> = Mutex<RefCell<Option<ManuallyDrop<Timer<'static, T>>>>>;
+pub use crate::setup::TimerSlot;
 
 /// Maximum number of `LinearItem` descriptors in a full BCM chain.
 /// Equals `2^MAX_PLANES - 1` = 255.
@@ -199,6 +196,18 @@ pub fn update_item_sources_2d(
     for (i, &(ptr, _)) in planes.iter().enumerate().take(plane_count) {
         items[i].item.sar = ptr as u32;
     }
+}
+
+/// Default transfer options for GPDMA linked-list HUB75 transfers.
+///
+/// Shared by the linear and 2D GPDMA backends.
+#[doc(hidden)]
+pub(crate) fn gpdma_transfer_options() -> TransferOptions {
+    let mut options = TransferOptions::default();
+    options.priority = Priority::VeryHigh;
+    options.complete_transfer_ir = true;
+    options.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
+    options
 }
 
 // ---------------------------------------------------------------------------
@@ -466,29 +475,8 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
     where
         FB: FrameBuffer<Word = P::Word>,
     {
-        let odr_addr = pins.configure_and_get_odr(config.gpio_speed).as_ptr();
-
-        let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
-
-        // --- Timer setup (identical to the plain DMA backend) ---
-        let timer = Timer::new(tim);
-        timer.set_counting_mode(CountingMode::EdgeAlignedUp);
-        timer.set_frequency(config.frequency, RoundTo::Slower);
-        timer.enable_outputs();
-
-        timer.set_output_compare_mode(TimChannel::Ch1, OutputCompareMode::PwmMode2);
-        timer.set_output_compare_preload(TimChannel::Ch1, true);
-        timer.set_autoreload_preload(true);
-
-        let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(
-            TimChannel::Ch1,
-            (u64::from(max) * 4 / 5).try_into().unwrap(),
-        );
-
-        timer.enable_channel(TimChannel::Ch1, true);
-        timer.generate_update_event();
-        timer.enable_update_dma(true);
+        let hw = crate::setup::hardware(tim, clock_pin, pins, &config);
+        let odr_addr = hw.odr_addr;
 
         let request = <D as UpDma<T>>::request(&*dma_ch);
         let channel = Channel::new(dma_ch, dma_irq);
@@ -510,17 +498,11 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         // TCEM on individual items is set in build_item_chain; the
         // transfer_complete_mode here only affects the initial channel
         // TR2 which is overwritten by the first LLI.
-        let mut options = TransferOptions::default();
-        options.priority = Priority::VeryHigh;
-        options.complete_transfer_ir = true;
-        options.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
+        let options = gpdma_transfer_options();
 
         critical_section::with(|cs| {
-            // SAFETY: Timer<'d> → Timer<'static>. See dma.rs for rationale.
-            let timer_static: ManuallyDrop<Timer<'static, T>> = ManuallyDrop::new(unsafe {
-                core::mem::transmute::<Timer<'_, T>, Timer<'static, T>>(timer)
-            });
-            *timer_slot.borrow_ref_mut(cs) = Some(timer_static);
+            // SAFETY: Timer<'d> → Timer<'static>. See setup.rs for rationale.
+            unsafe { crate::setup::store_timer(hw.timer, timer_slot, cs) };
 
             // SAFETY: Channel<'d> → Channel<'static>. The DMA channel
             // peripheral is consumed by this driver and will never be
@@ -541,7 +523,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         });
 
         Self {
-            _clock_pin: clock_pin,
+            _clock_pin: hw.clock_pin,
             core,
             _fb: PhantomData,
         }
