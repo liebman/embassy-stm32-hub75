@@ -31,7 +31,8 @@ embedded-graphics = "0.8.2"
 embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
-hub75-framebuffer = "0.10.0"
+# hub75-framebuffer = { version = "0.11.0" }
+hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer.git", rev = "4e45ed4f1d62cf186f3913ced43225fd74c1a15e" }
 
 [features]
 default = []
@@ -55,6 +56,13 @@ trail-blank-2 = ["hub75-framebuffer/trail-blank-2"]
 trail-blank-4 = ["hub75-framebuffer/trail-blank-4"]
 trail-blank-8 = ["hub75-framebuffer/trail-blank-8"]
 trail-blank-16 = ["hub75-framebuffer/trail-blank-16"]
+lead-blank-32 = ["hub75-framebuffer/lead-blank-32"]
+trail-blank-32 = ["hub75-framebuffer/trail-blank-32"]
+inter-row-blank-4 = ["hub75-framebuffer/inter-row-blank-4"]
+inter-row-blank-8 = ["hub75-framebuffer/inter-row-blank-8"]
+inter-row-blank-16 = ["hub75-framebuffer/inter-row-blank-16"]
+inter-row-blank-32 = ["hub75-framebuffer/inter-row-blank-32"]
+reverse-row-order = ["hub75-framebuffer/reverse-row-order"]
 gpdma = []
 
 # only used for documentation!
@@ -83,5 +91,3 @@ embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "82560
 embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 
-
-# hub75-framebuffer = { path = "../hub75-framebuffer" }

@@ -225,7 +225,7 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH0,
         Irqs,
         pins,
-        Config::new().frequency(Hertz(18_000_000)),
+        Config::new().frequency(Hertz(10_000_000)),
         fb0,
     );
     info!("Hub75 started");

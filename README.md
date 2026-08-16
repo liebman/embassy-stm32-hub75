@@ -15,9 +15,9 @@ a GPIO port with zero CPU involvement per pixel.
 A hardware timer generates a PWM pixel clock on CH1 and triggers DMA
 byte-transfers from a bitplane framebuffer to the GPIO ODR register on each
 update event. DMA transfer-complete interrupts drive a Binary Code Modulation
-(BCM) state machine that advances through bitplanes with exponential weighting.
-The ISR stops and resets the timer between planes for deterministic clock
-alignment.
+(BCM) state machine that walks the framebuffer's BCM segment sequence,
+streaming each segment for its weighted repetition count. The ISR stops and
+resets the timer between segments for deterministic clock alignment.
 
 ## Features
 
@@ -68,10 +68,11 @@ need a direct dependency on `hub75-framebuffer`:
 | `skip-black-pixels` | Skip writing black pixels to the framebuffer, leaving bitplane data unchanged |
 | `invert-oe` | Invert the output-enable signal in the framebuffer |
 | `tail-closes-latch` | Append a tail word that closes the latch after data is shifted in (plain 16-bit mode only) |
-| `blank-delay-1` | Insert 1 blank delay cycle after latching (plain 16-bit mode only) |
-| `blank-delay-2` | Insert 2 blank delay cycles after latching (plain 16-bit mode only) |
-| `blank-delay-4` | Insert 4 blank delay cycles after latching (plain 16-bit mode only) |
-| `blank-delay-8` | Insert 8 blank delay cycles after latching (plain 16-bit mode only) |
+| `lead-blank-{1,2,4,8,16,32}` | Blank delay cycles before the row-address change (mutually exclusive) |
+| `trail-blank-{1,2,4,8,16,32}` | Blank delay cycles after the row-address change (mutually exclusive) |
+| `inter-row-blank-{4,8,16,32}` | Blank cycles inserted between rows (mutually exclusive) |
+| `reverse-row-order` | Stream rows in reverse order |
+| `gpdma` | Enable the GPDMA linked-list backends (`gpdma::Hub75Gpdma` and `gpdma_2d::Hub75Gpdma2d`) |
 
 ## Quick start
 

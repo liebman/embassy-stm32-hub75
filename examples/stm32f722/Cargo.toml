@@ -44,7 +44,6 @@ heapless = "0.9.3"
 
 [patch.crates-io]
 
-# hub75-framebuffer = { path = "../../../hub75-framebuffer" }
 
 # embassy-stm32 = { path = "../../../embassy/embassy-stm32" }
 # embassy-time-driver = { path = "../../../embassy/embassy-time-driver" }

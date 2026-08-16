@@ -2,9 +2,9 @@
 //!
 //! Achieves BCM (Binary Code Modulation) weighting by duplicating
 //! [`LinearItem`] descriptors in a single linked-list chain, matching
-//! the `full-chain-dma` pattern from `esp-hub75`. Plane `i` gets
-//! `2^(N-1-i)` consecutive descriptors all pointing at the same data,
-//! giving a total chain length of `2^N - 1` items per BCM frame.
+//! the `full-chain-dma` pattern from `esp-hub75`. Each [`BcmSegment`]
+//! exposed by the framebuffer gets `reps` consecutive descriptors all
+//! pointing at the same segment data.
 //!
 //! With `TR2.TCEM = LAST_LINKED_LIST_ITEM`, the GPDMA walks the
 //! entire chain autonomously and fires **one** TC interrupt at the
@@ -43,9 +43,8 @@ use embassy_stm32::timer::{Ch1, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
 #[doc(hidden)]
-pub use crate::bcm::MAX_PLANES;
-use crate::bcm::{planes_from_fb, PlaneInfo};
-use crate::framebuffer::FrameBuffer;
+pub use crate::bcm::MAX_SEGMENTS;
+use crate::framebuffer::{BcmSegment, FrameBuffer};
 use crate::{Config, Hub75Error, Hub75Pins};
 
 /// Re-export of [`crate::setup::TimerSlot`] for the `hub75_gpdma_define!` macro.
@@ -53,8 +52,12 @@ use crate::{Config, Hub75Error, Hub75Pins};
 pub use crate::setup::TimerSlot;
 
 /// Maximum number of `LinearItem` descriptors in a full BCM chain.
-/// Equals `2^MAX_PLANES - 1` = 255.
-pub const MAX_DESCRIPTORS: usize = (1 << MAX_PLANES) - 1;
+///
+/// Equals `2^8 - 1` = 255: a frame-major bitplane framebuffer with
+/// `PLANES` planes needs `2^(PLANES-1)` descriptors (8 planes = 128).
+/// Row-major layouts need `NROWS * 2^(PLANES-1)` descriptors and are
+/// rejected at compile time when they exceed this limit.
+pub const MAX_DESCRIPTORS: usize = (1 << 8) - 1;
 
 /// Create a zeroed `LinearItem`, suitable for const/static init.
 #[doc(hidden)]
@@ -72,9 +75,23 @@ pub const fn zeroed_linear_item() -> LinearItem {
     }
 }
 
-/// Number of descriptors for a given plane count: `2^plane_count - 1`.
-const fn descriptor_count(plane_count: usize) -> usize {
-    (1 << plane_count) - 1
+/// Number of `LinearItem` descriptors needed to stream `FB`'s BCM
+/// segment sequence: the sum of the repetition counts of every segment
+/// in one complete panel refresh.
+///
+/// Equals `2^(PLANES-1)` for frame-major bitplane framebuffers.
+const fn descriptor_count<FB: FrameBuffer>() -> usize {
+    let mut total = 0;
+    let mut seq = 0;
+    while seq < FB::BCM_SEQUENCE_COUNT {
+        let mut i = 0;
+        while i < FB::BCM_SEQUENCE_LEN {
+            total += FB::BCM_SEGMENT_SHAPES[i].1;
+            i += 1;
+        }
+        seq += 1;
+    }
+    total
 }
 
 // ---------------------------------------------------------------------------
@@ -88,29 +105,54 @@ fn item_offset(item: &LinearItem) -> u16 {
 }
 
 /// Populate the linked-list chain with duplicated descriptors for
-/// BCM weighting.
+/// BCM weighting, from the framebuffer's [`BcmSegment`] sequence.
 ///
-/// For each plane `i`, creates `2^(N-1-i)` consecutive `LinearItem`
-/// entries pointing at the same plane data. The total chain length
-/// is `2^N - 1`. The terminal item has `llr = 0`, which triggers a
-/// TC interrupt at the frame boundary (via `TCEM = LAST_LLI`).
+/// For each segment, creates `reps` consecutive `LinearItem` entries
+/// pointing at the same segment data. The terminal item has `llr = 0`,
+/// which triggers a TC interrupt at the frame boundary (via
+/// `TCEM = LAST_LLI`).
+///
+/// Compile-time assertion: the descriptor count computed from
+/// [`FrameBuffer::BCM_SEGMENT_SHAPES`] must fit into [`MAX_DESCRIPTORS`].
 ///
 /// Returns the number of active items in the chain.
 #[doc(hidden)]
-pub fn build_item_chain(
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn build_item_chain<FB: FrameBuffer>(
     items: &mut [LinearItem; MAX_DESCRIPTORS],
-    planes: &PlaneInfo,
-    plane_count: usize,
+    fb: &FB,
     odr_addr: *mut u8,
     word_size: WordSize,
     request: dma::Request,
 ) -> usize {
+    const {
+        assert!(
+            descriptor_count::<FB>() <= MAX_DESCRIPTORS,
+            "framebuffer BCM sequence needs more descriptors than MAX_DESCRIPTORS"
+        );
+    }
+    let segment_count = fb.bcm_segment_count();
     assert!(
-        plane_count > 0 && plane_count <= MAX_PLANES,
-        "plane_count {plane_count} out of range 1..={MAX_PLANES}"
+        segment_count > 0 && segment_count <= MAX_SEGMENTS,
+        "bcm_segment_count {segment_count} out of range 1..={MAX_SEGMENTS}"
     );
 
-    let total = descriptor_count(plane_count);
+    // Runtime total; must agree with the static shapes used by the
+    // compile-time assertion above.
+    let mut total = 0;
+    for i in 0..segment_count {
+        let segment = fb.bcm_segment(i);
+        debug_assert!(
+            {
+                let (shape_len, shape_reps) = FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN];
+                segment.len == shape_len && segment.reps == shape_reps
+            },
+            "bcm_segment({i}) disagrees with BCM_SEGMENT_SHAPES {:?}",
+            FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN],
+        );
+        total += segment.reps;
+    }
+    debug_assert_eq!(total, descriptor_count::<FB>());
     assert!(total <= MAX_DESCRIPTORS);
 
     let base = items.as_ptr() as usize;
@@ -125,8 +167,8 @@ pub fn build_item_chain(
     config.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
 
     let mut idx = 0;
-    for (plane, &(ptr, len)) in planes.iter().enumerate().take(plane_count) {
-        let reps = 1usize << (plane_count - 1 - plane);
+    for i in 0..segment_count {
+        let BcmSegment { ptr, len, reps } = fb.bcm_segment(i);
 
         for _ in 0..reps {
             // Create a write transfer item (memory → peripheral/ODR)
@@ -145,8 +187,12 @@ pub fn build_item_chain(
                         len.is_multiple_of(2),
                         "DMA buffer length is not a multiple of 2"
                     );
+                    #[allow(clippy::cast_ptr_alignment)]
                     let buf = unsafe { core::slice::from_raw_parts(ptr.cast::<u16>(), len / 2) };
-                    unsafe { LinearItem::new_write(request, buf, odr_addr.cast::<u16>(), config) }
+                    #[allow(clippy::cast_ptr_alignment)]
+                    unsafe {
+                        LinearItem::new_write(request, buf, odr_addr.cast::<u16>(), config)
+                    }
                 }
                 _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
             };
@@ -165,36 +211,27 @@ pub fn build_item_chain(
     total
 }
 
-/// Patch source-address fields across all active descriptors.
+/// Shift the source-address fields of all active descriptors by
+/// `delta` bytes.
 ///
-/// Iterates the same plane-x-reps pattern used during construction
-/// to update each item's `sar` with the new plane pointer.
+/// Called at a framebuffer swap: the old and new framebuffers have
+/// the same `FB` type and therefore identical layout, so every
+/// descriptor's `sar` moves by the same byte offset.
 #[doc(hidden)]
-pub fn update_item_sources(
-    items: &mut [LinearItem; MAX_DESCRIPTORS],
-    planes: &PlaneInfo,
-    plane_count: usize,
-) {
-    let mut idx = 0;
-    for (plane, &(ptr, _)) in planes.iter().enumerate().take(plane_count) {
-        let reps = 1usize << (plane_count - 1 - plane);
-        let sar = ptr as u32;
-        for _ in 0..reps {
-            items[idx].item.sar = sar;
-            idx += 1;
-        }
+pub fn apply_item_delta(items: &mut [LinearItem; MAX_DESCRIPTORS], count: usize, delta: isize) {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    for item in items.iter_mut().take(count) {
+        item.item.sar = item.item.sar.wrapping_add(delta as u32);
     }
 }
 
-/// Patch source-address fields on 2D items (one item per plane).
+/// Shift the source-address fields of all active 2D descriptors by
+/// `delta` bytes (one item per BCM segment).
 #[doc(hidden)]
-pub fn update_item_sources_2d(
-    items: &mut [TwoDItem; MAX_PLANES],
-    planes: &PlaneInfo,
-    plane_count: usize,
-) {
-    for (i, &(ptr, _)) in planes.iter().enumerate().take(plane_count) {
-        items[i].item.sar = ptr as u32;
+pub fn apply_item_delta_2d(items: &mut [TwoDItem; MAX_SEGMENTS], count: usize, delta: isize) {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    for item in items.iter_mut().take(count) {
+        item.item.sar = item.item.sar.wrapping_add(delta as u32);
     }
 }
 
@@ -217,10 +254,9 @@ pub(crate) fn gpdma_transfer_options() -> TransferOptions {
 struct GpdmaIsrCoreState {
     channel: Channel<'static>,
     options: TransferOptions,
-    planes: PlaneInfo,
-    plane_count: usize,
+    descriptor_count: usize,
     current_fb_ptr: *const (),
-    pending_planes: Option<PlaneInfo>,
+    pending_delta: Option<isize>,
     pending_fb_ptr: *const (),
     returned_fb_ptr: *const (),
 }
@@ -277,13 +313,12 @@ impl GpdmaIsrCore {
 
         self.frame_count.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(pending) = state.pending_planes.take() {
+        if let Some(delta) = state.pending_delta.take() {
             state.returned_fb_ptr = state.current_fb_ptr;
             state.current_fb_ptr = state.pending_fb_ptr;
             state.pending_fb_ptr = core::ptr::null();
-            state.planes = pending;
 
-            update_item_sources(items, &pending, state.plane_count);
+            apply_item_delta(items, state.descriptor_count, delta);
 
             self.signal_swap_done(cs);
         }
@@ -319,20 +354,19 @@ impl GpdmaIsrCore {
     pub unsafe fn on_chain_complete_2d(
         &self,
         cs: critical_section::CriticalSection,
-        items: &mut [TwoDItem; MAX_PLANES],
+        items: &mut [TwoDItem; MAX_SEGMENTS],
     ) {
         let mut borrow = self.state.borrow_ref_mut(cs);
         let Some(state) = borrow.as_mut() else { return };
 
         self.frame_count.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(pending) = state.pending_planes.take() {
+        if let Some(delta) = state.pending_delta.take() {
             state.returned_fb_ptr = state.current_fb_ptr;
             state.current_fb_ptr = state.pending_fb_ptr;
             state.pending_fb_ptr = core::ptr::null();
-            state.planes = pending;
 
-            update_item_sources_2d(items, &pending, state.plane_count);
+            apply_item_delta_2d(items, state.descriptor_count, delta);
 
             self.signal_swap_done(cs);
         }
@@ -345,7 +379,7 @@ impl GpdmaIsrCore {
     pub fn restart_chain_2d(
         &self,
         cs: critical_section::CriticalSection,
-        table: &Table<TwoDItem, { MAX_PLANES }>,
+        table: &Table<TwoDItem, { MAX_SEGMENTS }>,
     ) {
         let borrow = self.state.borrow_ref(cs);
         let Some(state) = borrow.as_ref() else { return };
@@ -366,15 +400,15 @@ impl GpdmaIsrCore {
     /// # Errors
     /// Returns `Hub75Error::NotInitialised` if the driver state has
     /// not been set up.
-    pub async unsafe fn swap_inner(
-        &self,
-        new_planes: PlaneInfo,
-        new_fb_ptr: *const (),
-    ) -> Result<*const (), Hub75Error> {
+    pub async unsafe fn swap_inner(&self, new_fb_ptr: *const ()) -> Result<*const (), Hub75Error> {
         critical_section::with(|cs| {
             let mut borrow = self.state.borrow_ref_mut(cs);
             let state = borrow.as_mut().ok_or(Hub75Error::NotInitialised)?;
-            state.pending_planes = Some(new_planes);
+            // The old and new framebuffers have the same `FB` type and
+            // therefore identical layout, so every descriptor's source
+            // address shifts by the same byte delta.
+            let delta = new_fb_ptr as isize - state.current_fb_ptr as isize;
+            state.pending_delta = Some(delta);
             state.pending_fb_ptr = new_fb_ptr;
             self.swap_done.store(false, Ordering::Relaxed);
             Ok(())
@@ -414,17 +448,15 @@ impl GpdmaIsrCore {
         cs: critical_section::CriticalSection,
         channel: Channel<'static>,
         options: TransferOptions,
-        planes: PlaneInfo,
-        plane_count: usize,
+        descriptor_count: usize,
         fb_ptr: *const (),
     ) {
         *self.state.borrow_ref_mut(cs) = Some(GpdmaIsrCoreState {
             channel,
             options,
-            planes,
-            plane_count,
+            descriptor_count,
             current_fb_ptr: fb_ptr,
-            pending_planes: None,
+            pending_delta: None,
             pending_fb_ptr: core::ptr::null(),
             returned_fb_ptr: core::ptr::null(),
         });
@@ -441,7 +473,7 @@ impl GpdmaIsrCore {
 /// loop.
 ///
 /// BCM weighting is achieved by duplicating `LinearItem` descriptors
-/// (one per bitplane repetition) in a single chain. The GPDMA
+/// (one per BCM segment repetition) in a single chain. The GPDMA
 /// traverses the chain autonomously; one ISR fires per complete
 /// BCM frame.
 ///
@@ -482,17 +514,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         let channel = Channel::new(dma_ch, dma_irq);
 
         // --- Build the linked-list descriptor chain ---
-        let (planes, plane_count) = planes_from_fb(fb);
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
 
-        build_item_chain(
-            &mut items.items,
-            &planes,
-            plane_count,
-            odr_addr,
-            P::DMA_WORD_SIZE,
-            request,
-        );
+        let descriptor_count =
+            build_item_chain(&mut items.items, fb, odr_addr, P::DMA_WORD_SIZE, request);
 
         // Transfer options for linked-list configuration.
         // TCEM on individual items is set in build_item_chain; the
@@ -517,7 +542,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
             let transfer = unsafe { channel.linked_list(items, options) };
             core::mem::forget(transfer);
 
-            core.init_state(cs, channel, options, planes, plane_count, fb_ptr);
+            core.init_state(cs, channel, options, descriptor_count, fb_ptr);
 
             timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
@@ -538,17 +563,17 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
     /// Replace the displayed framebuffer, returning the previously-displayed one.
     ///
     /// Queues `new_fb` for display and yields until the ISR reaches a
-    /// frame boundary, at which point plane pointers are swapped
-    /// atomically. Returns an exclusive reference to the old
-    /// framebuffer that is no longer being read by the GPDMA.
+    /// frame boundary, at which point all descriptor source addresses
+    /// are shifted to the new framebuffer atomically. Returns an
+    /// exclusive reference to the old framebuffer that is no longer
+    /// being read by the GPDMA.
     ///
     /// # Errors
     /// Returns `Hub75Error::NotInitialised` if the driver has not
     /// been initialised.
     pub async fn swap(&mut self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
-        let (new_planes, _) = planes_from_fb(new_fb);
         let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
-        let old_ptr = unsafe { self.core.swap_inner(new_planes, fb_ptr).await? };
+        let old_ptr = unsafe { self.core.swap_inner(fb_ptr).await? };
         Ok(unsafe { &mut *(old_ptr as *mut FB) })
     }
 }

@@ -42,7 +42,14 @@
 //! byte per pixel-clock instead of two), but requires an external
 //! 74HC574-style latch circuit (see the `hub75-framebuffer` README for the
 //! schematic). Both store one bit per pixel per plane and are output via DMA
-//! without format conversion.
+//! without format conversion. Both come in a plane-major (`frame`) and a
+//! row-major (`row`) layout.
+//!
+//! The BCM scan sequence — an ordered list of variable-length segments,
+//! each streamed a given number of repetitions — is described entirely by
+//! the framebuffer via `FrameBuffer::bcm_segment()`. The driver streams the
+//! segments in order without needing to know the framebuffer's memory
+//! layout.
 //!
 //! ## Defining an Instance
 //!
@@ -78,8 +85,15 @@
 //!   (forwards to hub75-framebuffer)
 //! - `tail-closes-latch` -- append a tail word that closes the latch after data
 //!   is shifted in; plain 16-bit mode only (forwards to hub75-framebuffer)
-//! - `blank-delay-{1,2,4,8}` -- insert 1/2/4/8 blank delay cycles after
-//!   latching; plain 16-bit mode only (forwards to hub75-framebuffer)
+//! - `lead-blank-{1,2,4,8,16,32}` / `trail-blank-{1,2,4,8,16,32}` -- blank
+//!   delay cycles before/after the row-address change; mutually exclusive
+//!   per class (forwards to hub75-framebuffer)
+//! - `inter-row-blank-{4,8,16,32}` -- blank cycles inserted between rows;
+//!   mutually exclusive (forwards to hub75-framebuffer)
+//! - `reverse-row-order` -- stream rows in reverse order (forwards to
+//!   hub75-framebuffer)
+//! - `gpdma` -- enable the GPDMA linked-list backends (`gpdma::Hub75Gpdma`
+//!   and `gpdma_2d::Hub75Gpdma2d`)
 
 #![no_std]
 #![warn(missing_docs)]

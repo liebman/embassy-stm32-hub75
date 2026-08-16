@@ -2,12 +2,15 @@
 //!
 //! Uses 2D-capable GPDMA channels with hardware block-repeat to achieve
 //! BCM (Binary Code Modulation) weighting. Instead of duplicating
-//! descriptors (as the linear backend does), each bitplane gets a single
-//! [`TwoDItem`] with `block_repeat_count` set to `2^(N-1-i) - 1`,
-//! causing the hardware to repeat the transfer `2^(N-1-i)` times total.
+//! descriptors (as the linear backend does), each [`BcmSegment`] exposed
+//! by the framebuffer gets a single [`TwoDItem`] with `block_repeat_count`
+//! set to `reps - 1`, causing the hardware to repeat the transfer `reps`
+//! times total.
 //!
-//! This reduces the descriptor table from 255 × 24 bytes (linear) to
-//! 8 × 32 bytes (2D) while producing identical BCM timing.
+//! This reduces the descriptor table to one item per BCM segment —
+//! 8 × 32 bytes for a frame-major 8-plane layout — while producing
+//! identical BCM timing, and it also supports row-major bitplane
+//! layouts (up to [`MAX_SEGMENTS`] segments).
 //!
 //! Requires a 2D-capable GPDMA channel (enforced at compile time via
 //! the [`TwoDChannelInstance`] trait bound).
@@ -25,8 +28,8 @@ use embassy_stm32::timer::simple_pwm::PwmPin;
 use embassy_stm32::timer::{Ch1, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
-use crate::bcm::{planes_from_fb, PlaneInfo, MAX_PLANES};
-use crate::framebuffer::FrameBuffer;
+use crate::bcm::MAX_SEGMENTS;
+use crate::framebuffer::{BcmSegment, FrameBuffer};
 use crate::gpdma::{GpdmaIsrCore, TimerSlot};
 use crate::{Config, Hub75Error, Hub75Pins};
 
@@ -61,40 +64,64 @@ fn item_offset(item: &TwoDItem) -> u16 {
 
 /// Populate the 2D linked-list chain for BCM weighting.
 ///
-/// Creates one `TwoDItem` per bitplane, using the hardware
-/// `block_repeat_count` to repeat each plane transfer
-/// `2^(N-1-i)` times. The total number of items equals `plane_count`.
+/// Creates one `TwoDItem` per [`BcmSegment`], using the hardware
+/// `block_repeat_count` to repeat each segment transfer `reps` times.
+/// The total number of items equals the framebuffer's segment count
+/// (`BCM_SEGMENT_COUNT`).
+///
+/// Compile-time assertion: the framebuffer's segment count must fit into
+/// [`MAX_SEGMENTS`].
 ///
 /// Returns the number of active items.
 #[doc(hidden)]
-pub fn build_item_chain_2d(
-    items: &mut [TwoDItem; MAX_PLANES],
-    planes: &PlaneInfo,
-    plane_count: usize,
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn build_item_chain_2d<FB: FrameBuffer>(
+    items: &mut [TwoDItem; MAX_SEGMENTS],
+    fb: &FB,
     odr_addr: *mut u8,
     word_size: WordSize,
     request: dma::Request,
 ) -> usize {
+    const {
+        assert!(
+            FB::BCM_SEGMENT_COUNT <= MAX_SEGMENTS,
+            "framebuffer BCM segment count exceeds MAX_SEGMENTS"
+        );
+    }
+    let segment_count = fb.bcm_segment_count();
     assert!(
-        plane_count > 0 && plane_count <= MAX_PLANES,
-        "plane_count {plane_count} out of range 1..={MAX_PLANES}"
+        segment_count > 0 && segment_count <= MAX_SEGMENTS,
+        "bcm_segment_count {segment_count} out of range 1..={MAX_SEGMENTS}"
     );
 
     let base = items.as_ptr() as usize;
-    let end = base + core::mem::size_of::<TwoDItem>() * plane_count - 1;
+    let end = base + core::mem::size_of::<TwoDItem>() * segment_count - 1;
     assert_eq!(
         base >> 16,
         end >> 16,
         "GPDMA 2D descriptor chain spans a 64 KB boundary"
     );
 
-    for (i, &(ptr, len)) in planes.iter().enumerate().take(plane_count) {
-        let reps = (1u16 << (plane_count - 1 - i)) - 1;
+    for i in 0..segment_count {
+        let BcmSegment { ptr, len, reps } = fb.bcm_segment(i);
+        debug_assert!(
+            {
+                let (shape_len, shape_reps) = FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN];
+                len == shape_len && reps == shape_reps
+            },
+            "bcm_segment({i}) disagrees with BCM_SEGMENT_SHAPES {:?}",
+            FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN],
+        );
+        assert!(
+            (1..=2048).contains(&reps),
+            "segment {i} reps {reps} out of range 1..=2048"
+        );
 
         let mut config = TwoDConfig::default();
         config.linear.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
-        config.block_repeat_count = reps;
-        config.block_src_addr_offset = -(len as i32);
+        config.block_repeat_count = u16::try_from(reps - 1).expect("reps range checked above");
+        config.block_src_addr_offset =
+            -i32::try_from(len).expect("segment length exceeds i32::MAX");
 
         let mut item = match word_size {
             WordSize::OneByte => {
@@ -110,13 +137,17 @@ pub fn build_item_chain_2d(
                     len.is_multiple_of(2),
                     "DMA buffer length is not a multiple of 2"
                 );
+                #[allow(clippy::cast_ptr_alignment)]
                 let buf = unsafe { core::slice::from_raw_parts(ptr.cast::<u16>(), len / 2) };
-                unsafe { TwoDItem::new_write(request, buf, odr_addr.cast::<u16>(), config) }
+                #[allow(clippy::cast_ptr_alignment)]
+                unsafe {
+                    TwoDItem::new_write(request, buf, odr_addr.cast::<u16>(), config)
+                }
             }
             _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
         };
 
-        if i + 1 < plane_count {
+        if i + 1 < segment_count {
             let next_offset = item_offset(&items[i + 1]);
             item.link_to(next_offset);
         }
@@ -124,7 +155,7 @@ pub fn build_item_chain_2d(
         items[i] = item;
     }
 
-    plane_count
+    segment_count
 }
 
 // ---------------------------------------------------------------------------
@@ -135,8 +166,8 @@ pub fn build_item_chain_2d(
 /// loop.
 ///
 /// BCM weighting is achieved via the hardware block-repeat count on each
-/// `TwoDItem`. Only `plane_count` descriptors are needed (typically 6-8),
-/// rather than 2^N - 1.
+/// `TwoDItem`. Only one descriptor per BCM segment is needed (typically
+/// 6-8 for frame-major layouts), rather than one per repetition.
 ///
 /// Created via the `hub75_gpdma_2d_define!` macro's generated `init()`
 /// function. Use [`Hub75Gpdma2d::swap()`] to double-buffer.
@@ -163,7 +194,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
         fb: &'static mut FB,
         core: &'static GpdmaIsrCore,
         timer_slot: &'static TimerSlot<T>,
-        items: &'static mut Table<TwoDItem, { MAX_PLANES }>,
+        items: &'static mut Table<TwoDItem, { MAX_SEGMENTS }>,
     ) -> Self
     where
         FB: FrameBuffer<Word = P::Word>,
@@ -174,17 +205,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
         let request = <D as UpDma<T>>::request(&*dma_ch);
         let channel = Channel::new(dma_ch, dma_irq);
 
-        let (planes, plane_count) = planes_from_fb(fb);
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
 
-        build_item_chain_2d(
-            &mut items.items,
-            &planes,
-            plane_count,
-            odr_addr,
-            P::DMA_WORD_SIZE,
-            request,
-        );
+        let descriptor_count =
+            build_item_chain_2d(&mut items.items, fb, odr_addr, P::DMA_WORD_SIZE, request);
 
         let options = crate::gpdma::gpdma_transfer_options();
 
@@ -198,7 +222,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
             let transfer = unsafe { channel.linked_list(items, options) };
             core::mem::forget(transfer);
 
-            core.init_state(cs, channel, options, planes, plane_count, fb_ptr);
+            core.init_state(cs, channel, options, descriptor_count, fb_ptr);
 
             timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
@@ -219,17 +243,17 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
     /// Replace the displayed framebuffer, returning the previously-displayed one.
     ///
     /// Queues `new_fb` for display and yields until the ISR reaches a
-    /// frame boundary, at which point plane pointers are swapped
-    /// atomically. Returns an exclusive reference to the old
-    /// framebuffer that is no longer being read by the GPDMA.
+    /// frame boundary, at which point all descriptor source addresses
+    /// are shifted to the new framebuffer atomically. Returns an
+    /// exclusive reference to the old framebuffer that is no longer
+    /// being read by the GPDMA.
     ///
     /// # Errors
     /// Returns `Hub75Error::NotInitialised` if the driver has not
     /// been initialised.
     pub async fn swap(&mut self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
-        let (new_planes, _) = planes_from_fb(new_fb);
         let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
-        let old_ptr = unsafe { self.core.swap_inner(new_planes, fb_ptr).await? };
+        let old_ptr = unsafe { self.core.swap_inner(fb_ptr).await? };
         Ok(unsafe { &mut *(old_ptr as *mut FB) })
     }
 }
@@ -289,7 +313,7 @@ macro_rules! hub75_gpdma_2d_define {
             use $crate::__macro_support::embassy_stm32::timer::{Ch1, TimerPin, UpDma};
             use $crate::__macro_support::embassy_stm32::Peri;
             use $crate::framebuffer::FrameBuffer;
-            use $crate::gpdma::{GpdmaIsrCore, TimerSlot, MAX_PLANES};
+            use $crate::gpdma::{GpdmaIsrCore, TimerSlot, MAX_SEGMENTS};
             use $crate::gpdma_2d::{self as gpdma_2d_driver};
 
             type DmaCh = $crate::__macro_support::embassy_stm32::peripherals::$dma_ch;
@@ -299,8 +323,8 @@ macro_rules! hub75_gpdma_2d_define {
 
             static CORE: GpdmaIsrCore = GpdmaIsrCore::new();
 
-            static mut ITEMS: Table<TwoDItem, { MAX_PLANES }> = Table {
-                items: [$crate::gpdma_2d::zeroed_two_d_item(); MAX_PLANES],
+            static mut ITEMS: Table<TwoDItem, { MAX_SEGMENTS }> = Table {
+                items: [$crate::gpdma_2d::zeroed_two_d_item(); MAX_SEGMENTS],
             };
 
             /// GPDMA interrupt handler for this 2D HUB75 instance.
