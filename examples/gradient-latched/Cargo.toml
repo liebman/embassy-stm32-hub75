@@ -61,7 +61,10 @@ stm32h563 = [
 # The dumb DMA driver is the default; `gpdma` / `gpdma-2d` switch to the
 # linked-list backends if available.
 gpdma = ["embassy-stm32-hub75/gpdma"]
-gpdma-2d = ["embassy-stm32-hub75/gpdma"]
+gpdma-2d = ["embassy-stm32-hub75/gpdma-2d"]
+
+# use row-bcm for the framebuffer instead of frame-bcm
+row = []
 
 # ---- logging ----
 defmt = [
@@ -92,6 +95,8 @@ inter-row-blank-8 = ["embassy-stm32-hub75/inter-row-blank-8"]
 inter-row-blank-16 = ["embassy-stm32-hub75/inter-row-blank-16"]
 inter-row-blank-32 = ["embassy-stm32-hub75/inter-row-blank-32"]
 reverse-row-order = ["embassy-stm32-hub75/reverse-row-order"]
+unsafe-swap-wait-1 = ["embassy-stm32-hub75/unsafe-swap-wait-1"]
+unsafe-swap-wait-0 = ["embassy-stm32-hub75/unsafe-swap-wait-0"]
 
 [patch.crates-io]
 embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }

@@ -57,6 +57,12 @@ the `hub75-framebuffer` crate for details).
 Use `Hub75Pins16::new(pins)` with an array of 16 `AnyPin` values, all on the
 same GPIO port occupying pins 0-15 in order.
 
+When driving the panel with plain DMA, you will almost certainly want to
+enable the `tail-closes-latch` feature. The last word output leaves the latch
+open, and the timer typically still emits a few clock pulses before it is
+stopped. `tail-closes-latch` appends an extra word that closes the latch on
+the next clock cycle, before any more pixels are clocked in.
+
 ## Cargo features
 
 All `hub75-framebuffer` features are forwarded through this crate so you do not
@@ -67,12 +73,15 @@ need a direct dependency on `hub75-framebuffer`:
 | `defmt` | Enable `defmt` logging (forwards to embassy-stm32, hub75-framebuffer, and embedded-graphics) |
 | `skip-black-pixels` | Skip writing black pixels to the framebuffer, leaving bitplane data unchanged |
 | `invert-oe` | Invert the output-enable signal in the framebuffer |
-| `tail-closes-latch` | Append a tail word that closes the latch after data is shifted in (plain 16-bit mode only) |
+| `tail-closes-latch` | Append a tail word that closes the latch on the next clock cycle after data is shifted in (plain 16-bit mode only; strongly recommended for plain DMA) |
 | `lead-blank-{1,2,4,8,16,32}` | Blank delay cycles before the row-address change (mutually exclusive) |
 | `trail-blank-{1,2,4,8,16,32}` | Blank delay cycles after the row-address change (mutually exclusive) |
 | `inter-row-blank-{4,8,16,32}` | Blank cycles inserted between rows (mutually exclusive) |
 | `reverse-row-order` | Stream rows in reverse order |
-| `gpdma` | Enable the GPDMA linked-list backends (`gpdma::Hub75Gpdma` and `gpdma_2d::Hub75Gpdma2d`) |
+| `gpdma` | Use the GPDMA linear linked-list backend (`gpdma::Hub75`). The descriptor chain is circular: the DMA engine starts once and loops forever with no per-frame restart |
+| `gpdma-2d` | Use the 2D GPDMA linked-list backend (`gpdma_2d::Hub75`); implies `gpdma` |
+| `unsafe-swap-wait-1` | GPDMA backends only: shorten `swap()`'s transfer-complete wait from two interrupts to one |
+| `unsafe-swap-wait-0` | GPDMA backends only: return from `swap()` as soon as the descriptor delta is applied (no interrupt wait) |
 
 ## Quick start
 
@@ -138,21 +147,6 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
 ## Pin wiring
 
-### 8-bit latched mode
-
-The 8 data pins map to the `hub75-framebuffer` latched byte layout:
-
-| Bit | Signal |
-|-----|--------|
-| 0   | R1     |
-| 1   | G1     |
-| 2   | B1     |
-| 3   | R2     |
-| 4   | G2     |
-| 5   | B2     |
-| 6   | LATCH  |
-| 7   | BLANK  |
-
 ### 16-bit plain mode
 
 All 16 pins of a GPIO port are used. The bit mapping from the
@@ -172,6 +166,21 @@ All 16 pins of a GPIO port are used. The bit mapping from the
 | 14    | B2           |
 | 15    | (unused)     |
 
+### 8-bit latched mode
+
+The 8 data pins map to the `hub75-framebuffer` latched byte layout:
+
+| Bit | Signal |
+|-----|--------|
+| 0   | R1     |
+| 1   | G1     |
+| 2   | B1     |
+| 3   | R2     |
+| 4   | G2     |
+| 5   | B2     |
+| 6   | LATCH  |
+| 7   | BLANK  |
+
 ### Clock pin
 
 The clock pin is passed separately and must be a valid TIM CH1 output for the
@@ -179,24 +188,53 @@ chosen timer (enforced at compile time).
 
 ## Examples
 
-Working examples are provided for three targets:
+Two working examples are provided, each driving a 64x64 panel with a gradient
+plus refresh-rate / render-time overlays:
 
-- **STM32WL55** (`examples/stm32wl55/`) -- 64x64 panel at 6 MHz pixel clock
-  (8-bit latched mode)
-- **STM32F722** (`examples/stm32f722/`) -- 64x64 panel at 20 MHz pixel clock,
-  includes a multi-task latched example with FPS counters (8-bit latched mode)
-- **STM32H723** (`examples/stm32h723/`) -- 64x64 panel at 18 MHz pixel clock,
-  16-bit plain mode on PD0-PD15 with TIM1 CLK on PE9
+- **`examples/gradient/`** -- 16-bit plain mode (`Hub75Pins16`) on PD0-PD15
+  with TIM1 CLK on PE9. Supports `stm32f722`, `stm32h563`, and `stm32h723`.
+- **`examples/gradient-latched/`** -- 8-bit latched mode (`Hub75Pins8`) on
+  PD0-PD7 (R1/G1/B1/R2/G2/B2/LATCH/BLANK) with TIM1 CLK on PE9 and a
+  SmartLEDShield-style latch circuit. Supports `stm32f722` and `stm32h563`.
 
-Each example overrides `Config::frequency` for its target while using the
-default `Speed::Medium` GPIO output speed.
+These examples are not limited to the boards they are wired for: the same code
+works on almost any STM32, as long as the required pins are available as
+consecutive pins on a single GPIO port (any port will do). See
+[Supported modes](#supported-modes) for the exact pin requirements.
 
-Build an example:
+Each example declares cargo aliases in its own `.cargo/config.toml` to build,
+run, and clippy it for every board it supports. From inside an example
+directory:
 
 ```bash
-cd examples/stm32f722
-cargo build --bin hello
+cd examples/gradient
+cargo run-f722        # build (release) + flash an STM32F722
+cargo run-h563        # build (release) + flash an STM32H563
+cargo run-h723        # build (release) + flash an STM32H723
+
+cargo build-h723      # build only, without flashing
+cargo clippy-h723     # clippy
 ```
+
+`run-<board>` loads the matching board config
+(`.cargo/config-stm32<board>.toml`) and flashes the target with `probe-rs`.
+
+The pixel clock defaults to 10 MHz, and the simplest (dumb) DMA driver is the
+default backend. Pass `-F` with a comma-separated feature list to override
+these, switch to a GPDMA backend, or pass through driver options:
+
+```bash
+cargo run-h723 -F 20mhz                       # 20 MHz pixel clock
+cargo run-h563 -F gpdma                       # GPDMA linear linked-list
+cargo run-h563 -F gpdma-2d                    # GPDMA 2D linked-list
+cargo run-h563 -F gpdma,trail-blank-4,20mhz,unsafe-swap-wait-1
+```
+
+The `gpdma` / `gpdma-2d` backends are only available on chips that have a
+GPDMA peripheral (e.g. `stm32h563`).
+
+`gradient-latched` supports `stm32f722` and `stm32h563` only, so its aliases
+are `run-f722` / `run-h563` (plus matching `build-*` / `clippy-*`).
 
 ## License
 

@@ -432,6 +432,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
 ///     fb0,
 /// );
 /// ```
+#[cfg(not(any(feature = "gpdma", feature = "gpdma-2d")))]
 #[macro_export]
 macro_rules! hub75_define {
     ($mod_name:ident, $timer:ty, $dma_ch:ty) => {

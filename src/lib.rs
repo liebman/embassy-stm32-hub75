@@ -33,6 +33,12 @@
 //! writes the full ODR register on each clock cycle. Pin layout and bit
 //! assignments depend on the framebuffer implementation used.
 //!
+//! When using plain DMA in 16-bit mode, you will almost certainly want the
+//! `tail-closes-latch` feature. The last word output leaves the latch open,
+//! and the timer typically still emits a few clock pulses before it is
+//! stopped. That feature appends an extra word that closes the latch on the
+//! next clock cycle, before any more pixels are clocked in.
+//!
 //! ## Framebuffers
 //!
 //! The `hub75-framebuffer` crate provides bitplane framebuffers that are
@@ -83,8 +89,9 @@
 //!   leaving the bitplane data unchanged (forwards to hub75-framebuffer)
 //! - `invert-oe` -- invert the output-enable signal in the framebuffer
 //!   (forwards to hub75-framebuffer)
-//! - `tail-closes-latch` -- append a tail word that closes the latch after data
-//!   is shifted in; plain 16-bit mode only (forwards to hub75-framebuffer)
+//! - `tail-closes-latch` -- append a tail word that closes the latch on the
+//!   next clock cycle after data is shifted in; plain 16-bit mode only, and
+//!   strongly recommended for plain DMA (forwards to hub75-framebuffer)
 //! - `lead-blank-{1,2,4,8,16,32}` / `trail-blank-{1,2,4,8,16,32}` -- blank
 //!   delay cycles before/after the row-address change; mutually exclusive
 //!   per class (forwards to hub75-framebuffer)
@@ -92,13 +99,31 @@
 //!   mutually exclusive (forwards to hub75-framebuffer)
 //! - `reverse-row-order` -- stream rows in reverse order (forwards to
 //!   hub75-framebuffer)
-//! - `gpdma` -- enable the GPDMA linked-list backends (`gpdma::Hub75Gpdma`
-//!   and `gpdma_2d::Hub75Gpdma2d`)
+//! - `gpdma` -- use the GPDMA linear linked-list backend (`gpdma::Hub75`)
+//! - `gpdma-2d` -- use the 2D GPDMA linked-list backend (`gpdma_2d::Hub75`);
+//!   implies `gpdma`
+//! - `unsafe-swap-wait-1` -- (GPDMA backends only) shorten `swap()`'s
+//!   transfer-complete wait from two interrupts to one
+//! - `unsafe-swap-wait-0` -- (GPDMA backends only) have `swap()` return as
+//!   soon as the descriptor delta is applied, without waiting for any
+//!   interrupt
+//!
+//! The `unsafe-` prefix marks a deliberate relaxation of the double-buffering
+//! safety contract: with `unsafe-swap-wait-1` the returned framebuffer may
+//! still be read by the GPDMA for one more descriptor, and with
+//! `unsafe-swap-wait-0` for the remainder of the current frame. Only enable
+//! them when the resulting visual tearing is acceptable.
 
 #![no_std]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
+
+#[cfg(all(feature = "unsafe-swap-wait-0", feature = "unsafe-swap-wait-1"))]
+compile_error!("enable at most one of: `unsafe-swap-wait-0`, `unsafe-swap-wait-1`");
+
+#[cfg(all(feature = "unsafe-swap-wait-0", not(feature = "gpdma")))]
+compile_error!("`unsafe-swap-wait-0` requires the `gpdma` backend (`gpdma` or `gpdma-2d`)");
 
 use core::ptr::NonNull;
 

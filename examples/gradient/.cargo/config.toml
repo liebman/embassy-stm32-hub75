@@ -7,8 +7,8 @@
 #
 # The dumb DMA driver is the default backend. On the STM32H563, switch to a
 # linked-list backend by appending the feature flag, e.g.:
-#   cargo build-h563 -F gpdma        # linear linked-list
-#   cargo build-h563 -F gpdma-2d     # 2D linked-list
+#   cargo build-h563 -F gpdma                     # linear linked-list
+#   cargo build-h563 -F gpdma-2d                  # 2D linked-list
 
 run-f722     = "run --config .cargo/config-stm32f722.toml --release --features stm32f722"
 run-h563     = "run --config .cargo/config-stm32h563.toml --release --features stm32h563"

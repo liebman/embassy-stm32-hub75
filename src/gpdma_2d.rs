@@ -14,6 +14,11 @@
 //!
 //! Requires a 2D-capable GPDMA channel (enforced at compile time via
 //! the [`TwoDChannelInstance`] trait bound).
+//!
+//! The terminal item links back to `item[0]` so the chain loops forever
+//! and the GPDMA is started once. As in the linear backend, the terminal
+//! node fires one TC per frame (`TR2.TCEM = EACH_LINKED_LIST_ITEM`) while
+//! the others stay silent ([`IsrCore::on_frame()`]).
 
 use core::marker::PhantomData;
 
@@ -30,7 +35,7 @@ use embassy_stm32::Peri;
 
 use crate::bcm::MAX_SEGMENTS;
 use crate::framebuffer::{BcmSegment, FrameBuffer};
-use crate::gpdma::{GpdmaIsrCore, TimerSlot};
+use crate::gpdma::{IsrCore, TimerSlot};
 use crate::{Config, Hub75Error, Hub75Pins};
 
 /// Create a zeroed `TwoDItem`, suitable for const/static init.
@@ -110,7 +115,14 @@ pub fn build_item_chain_2d<FB: FrameBuffer>(
         );
 
         let mut config = TwoDConfig::default();
-        config.linear.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
+        // Every node is silent (`LastLinkedListItem` — which never fires in a
+        // circular chain). The terminal node instead uses `EachLinkedListItem`
+        // so exactly one TC interrupt fires per frame.
+        config.linear.transfer_complete_mode = if i + 1 == segment_count {
+            TransferCompleteMode::EachLinkedListItem
+        } else {
+            TransferCompleteMode::LastLinkedListItem
+        };
         config.block_repeat_count = u16::try_from(reps - 1).expect("reps range checked above");
         config.block_src_addr_offset =
             -i32::try_from(len).expect("segment length exceeds i32::MAX");
@@ -139,10 +151,11 @@ pub fn build_item_chain_2d<FB: FrameBuffer>(
             _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
         };
 
-        if i + 1 < segment_count {
-            let next_offset = item_offset(&items[i + 1]);
-            item.link_to(next_offset);
-        }
+        // Link to the next item. The terminal item links back to item[0] so
+        // the chain loops forever.
+        let next_idx = if i + 1 < segment_count { i + 1 } else { 0 };
+        let next_offset = item_offset(&items[next_idx]);
+        item.link_to(next_offset);
 
         items[i] = item;
     }
@@ -151,7 +164,7 @@ pub fn build_item_chain_2d<FB: FrameBuffer>(
 }
 
 // ---------------------------------------------------------------------------
-// Hub75Gpdma2d — public driver handle
+// Hub75 — public driver handle
 // ---------------------------------------------------------------------------
 
 /// HUB75 LED matrix controller driven by a 2D GPDMA linked-list refresh
@@ -161,15 +174,27 @@ pub fn build_item_chain_2d<FB: FrameBuffer>(
 /// `TwoDItem`. Only one descriptor per BCM segment is needed (typically
 /// 6-8 for frame-major layouts), rather than one per repetition.
 ///
-/// Created via the `hub75_gpdma_2d_define!` macro's generated `init()`
-/// function. Use [`Hub75Gpdma2d::swap()`] to double-buffer.
-pub struct Hub75Gpdma2d<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> {
+/// Created via the `hub75_define!` macro's generated `init()`
+/// function. Use [`Hub75::swap()`] to double-buffer.
+pub struct Hub75<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> {
     _clock_pin: PwmPin<'d, T, Ch1>,
-    core: &'static GpdmaIsrCore,
+    core: &'static IsrCore,
+    items: *mut [TwoDItem; MAX_SEGMENTS],
+    descriptor_count: usize,
+    current_fb_ptr: *const (),
     _fb: PhantomData<&'static FB>,
 }
 
-impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d, T, FB> {
+// SAFETY: `items` points at this instance's `static` descriptor table and
+// `current_fb_ptr` points at a `'static` framebuffer — both outlive the
+// driver handle. `FB: Sync` preserves the bound previously implied by
+// `PhantomData<&'static FB>`.
+unsafe impl<T: GeneralInstance4Channel, FB: FrameBuffer + 'static + Sync> Send
+    for Hub75<'_, T, FB>
+{
+}
+
+impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB> {
     /// Create a new 2D GPDMA-backed HUB75 driver, configure hardware,
     /// and start rendering.
     ///
@@ -184,7 +209,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
         pins: P,
         config: Config,
         fb: &'static mut FB,
-        core: &'static GpdmaIsrCore,
+        core: &'static IsrCore,
         timer_slot: &'static TimerSlot<T>,
         items: &'static mut Table<TwoDItem, { MAX_SEGMENTS }>,
     ) -> Self
@@ -198,6 +223,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
         let channel = Channel::new(dma_ch, dma_irq);
 
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
+
+        // Capture a raw pointer to the descriptor table so swap() can patch
+        // SAR fields after `items` has been handed to the linked-list transfer.
+        let items_ptr = core::ptr::from_mut(&mut items.items);
 
         let descriptor_count =
             build_item_chain_2d(&mut items.items, fb, odr_addr, P::DMA_WORD_SIZE, request);
@@ -214,14 +243,15 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
             let transfer = unsafe { channel.linked_list(items, options) };
             core::mem::forget(transfer);
 
-            core.init_state(cs, channel, options, descriptor_count, fb_ptr);
-
             timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
 
         Self {
             _clock_pin: hw.clock_pin,
             core,
+            items: items_ptr,
+            descriptor_count,
+            current_fb_ptr: fb_ptr,
             _fb: PhantomData,
         }
     }
@@ -234,54 +264,86 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
 
     /// Replace the displayed framebuffer, returning the previously-displayed one.
     ///
-    /// Queues `new_fb` for display and yields until the ISR reaches a
-    /// frame boundary, at which point all descriptor source addresses
-    /// are shifted to the new framebuffer atomically. Returns an
-    /// exclusive reference to the old framebuffer that is no longer
-    /// being read by the GPDMA.
+    /// Immediately shifts every descriptor source address to `new_fb`, then
+    /// yields until the configured number of transfer-complete interrupts
+    /// have been observed before returning the old framebuffer. By default it
+    /// waits for two boundaries, after which the old framebuffer is
+    /// guaranteed to no longer be read by the GPDMA; the
+    /// `unsafe-swap-wait-1` / `unsafe-swap-wait-0` features shorten the wait
+    /// (see the crate-level feature docs).
     ///
     /// # Errors
-    /// Returns `Hub75Error::NotInitialised` if the driver has not
-    /// been initialised.
+    ///
+    /// This method is infallible for the GPDMA backends (a [`Hub75`] handle
+    /// only exists after initialisation); the `Result` return is kept for API
+    /// consistency with the plain-DMA backend.
     pub async fn swap(&mut self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
-        let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
-        let old_ptr = unsafe { self.core.swap_inner(fb_ptr).await? };
+        let new_fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
+
+        // The old and new framebuffers have the same `FB` type and therefore
+        // identical layout, so every descriptor's source address shifts by the
+        // same byte delta.
+        let delta = new_fb_ptr as isize - self.current_fb_ptr as isize;
+        let old_ptr = self.current_fb_ptr;
+        self.current_fb_ptr = new_fb_ptr;
+
+        if delta != 0 {
+            // SAFETY: `self.items` points at this instance's `static`
+            // descriptor table, captured before the table was handed to the
+            // forgotten linked-list transfer. `swap` holds `&mut self`, so
+            // this is the only CPU-side writer; the sole concurrent reader is
+            // the GPDMA, which reads a descriptor's SAR as it loads that item
+            // — a single-word store cannot race a torn read.
+            unsafe {
+                crate::gpdma::apply_item_delta_2d(&mut *self.items, self.descriptor_count, delta);
+            }
+        }
+
+        self.core.wait_swap().await;
+
+        // SAFETY: `old_ptr` is the previously-displayed `&'static mut FB`,
+        // handed back exclusively and no longer read by the GPDMA.
         Ok(unsafe { &mut *(old_ptr as *mut FB) })
     }
 }
 
 // ---------------------------------------------------------------------------
-// hub75_gpdma_2d_define! macro
+// hub75_define! macro
 // ---------------------------------------------------------------------------
 
 /// Define a 2D GPDMA-backed HUB75 driver instance with its own timer
 /// static, descriptor table, and ISR handler.
 ///
 /// Each invocation creates a public module containing:
-/// - `Hub75Gpdma2dHandler` — the GPDMA interrupt handler for `bind_interrupts!`
-/// - `Hub75Gpdma2d<'d, FB>` — a type alias for the driver
+/// - `Hub75DmaHandler` — the GPDMA interrupt handler for `bind_interrupts!`
+/// - `Hub75<'d, FB>` — a type alias for the driver
 /// - `init()` — constructs and starts the driver
 ///
 /// BCM weighting is achieved via the 2D block-repeat feature. Only one
 /// `TwoDItem` per bitplane is needed. Requires a 2D-capable GPDMA
 /// channel (compile-time enforced via `TwoDChannelInstance` trait bound).
 ///
+/// The descriptor chain is circular: the GPDMA is started once and loops
+/// forever, and the terminal linked-list node fires one TC interrupt per
+/// frame boundary. The pixel-clock timer free-runs — there is no per-frame
+/// stop/reset/restart.
+///
 /// # Parameters
 /// - `$mod_name` — name of the generated module
 /// - `$timer` — the concrete timer peripheral type
-/// - `$dma_ch` — the GPDMA channel peripheral name (must be 2D-capable)
+/// - `$dma_ch` — the GPDMA channel peripheral type (must be 2D-capable)
 ///
 /// # Example
 /// ```ignore
 /// use embassy_stm32::{bind_interrupts, dma, peripherals};
-/// use embassy_stm32_hub75::hub75_gpdma_2d_define;
+/// use embassy_stm32_hub75::hub75_define;
 ///
-/// hub75_gpdma_2d_define!(hub75, peripherals::TIM2, GPDMA1_CH4);
+/// hub75_define!(hub75, peripherals::TIM2, peripherals::GPDMA1_CH4);
 ///
 /// bind_interrupts!(struct Irqs {
 ///     GPDMA1_CHANNEL4 =>
 ///         dma::InterruptHandler<peripherals::GPDMA1_CH4>,
-///         hub75::Hub75Gpdma2dHandler;
+///         hub75::Hub75DmaHandler;
 /// });
 ///
 /// let hub75 = hub75::init(
@@ -290,9 +352,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma2d<'d,
 ///     fb0,
 /// );
 /// ```
+#[cfg(feature = "gpdma-2d")]
 #[macro_export]
-macro_rules! hub75_gpdma_2d_define {
-    ($mod_name:ident, $timer:ty, $dma_ch:ident) => {
+macro_rules! hub75_define {
+    ($mod_name:ident, $timer:ty, $dma_ch:ty) => {
         #[allow(non_snake_case)]
         pub mod $mod_name {
             use $crate::__macro_support::critical_section;
@@ -305,47 +368,42 @@ macro_rules! hub75_gpdma_2d_define {
             use $crate::__macro_support::embassy_stm32::timer::{Ch1, TimerPin, UpDma};
             use $crate::__macro_support::embassy_stm32::Peri;
             use $crate::framebuffer::FrameBuffer;
-            use $crate::gpdma::{GpdmaIsrCore, TimerSlot, MAX_SEGMENTS};
+            use $crate::gpdma::{IsrCore, TimerSlot, MAX_SEGMENTS};
             use $crate::gpdma_2d::{self as gpdma_2d_driver};
-
-            type DmaCh = $crate::__macro_support::embassy_stm32::peripherals::$dma_ch;
 
             static TIMER: TimerSlot<$timer> =
                 critical_section::Mutex::new(core::cell::RefCell::new(None));
 
-            static CORE: GpdmaIsrCore = GpdmaIsrCore::new();
+            static CORE: IsrCore = IsrCore::new();
 
             static mut ITEMS: Table<TwoDItem, { MAX_SEGMENTS }> = Table {
                 items: [$crate::gpdma_2d::zeroed_two_d_item(); MAX_SEGMENTS],
             };
 
             /// GPDMA interrupt handler for this 2D HUB75 instance.
-            pub struct Hub75Gpdma2dHandler;
+            pub struct Hub75DmaHandler;
 
-            impl Handler<<DmaCh as ChannelInstance>::Interrupt> for Hub75Gpdma2dHandler {
+            impl Handler<<$dma_ch as ChannelInstance>::Interrupt> for Hub75DmaHandler {
                 unsafe fn on_interrupt() {
                     critical_section::with(|cs| {
-                        let mut t = TIMER.borrow_ref_mut(cs);
-                        let timer = match t.as_mut() {
-                            Some(t) => t,
-                            None => return,
-                        };
+                        // Guard: only act once init() has stored the timer.
+                        if TIMER.borrow_ref(cs).is_none() {
+                            return;
+                        }
 
-                        timer.stop();
-                        timer.reset();
-
-                        CORE.on_chain_complete_2d(cs, unsafe { &mut ITEMS.items });
-
-                        CORE.restart_chain_2d(cs, unsafe { &ITEMS });
-
-                        timer.start();
+                        // The chain loops forever, so there is no timer/DMA
+                        // restart — a single TC on the terminal node drives
+                        // the frame boundary. Framebuffer deltas are applied
+                        // in swap() (not here), so the ISR only counts the
+                        // boundary.
+                        CORE.on_frame(cs);
                     });
                 }
             }
 
             /// Type alias for the 2D GPDMA-backed HUB75 driver bound to
             /// this instance's timer.
-            pub type Hub75Gpdma2d<'d, FB> = gpdma_2d_driver::Hub75Gpdma2d<'d, $timer, FB>;
+            pub type Hub75<'d, FB> = gpdma_2d_driver::Hub75<'d, $timer, FB>;
 
             /// Initialize the 2D GPDMA-backed HUB75 driver, configure
             /// hardware, and start rendering from the provided
@@ -353,23 +411,23 @@ macro_rules! hub75_gpdma_2d_define {
             pub fn init<'d, P: $crate::Hub75Pins, FB>(
                 tim: Peri<'d, $timer>,
                 clock_pin: Peri<'d, impl TimerPin<$timer, Ch1>>,
-                dma_ch: Peri<'d, DmaCh>,
+                dma_ch: Peri<'d, $dma_ch>,
                 dma_irq: impl Binding<
-                        <DmaCh as ChannelInstance>::Interrupt,
-                        dma::InterruptHandler<DmaCh>,
+                        <$dma_ch as ChannelInstance>::Interrupt,
+                        dma::InterruptHandler<$dma_ch>,
                     > + Binding<
-                        <DmaCh as ChannelInstance>::Interrupt,
-                        Hub75Gpdma2dHandler,
+                        <$dma_ch as ChannelInstance>::Interrupt,
+                        Hub75DmaHandler,
                     > + 'd,
                 pins: P,
                 config: $crate::Config,
                 fb: &'static mut FB,
-            ) -> Hub75Gpdma2d<'d, FB>
+            ) -> Hub75<'d, FB>
             where
-                DmaCh: UpDma<$timer> + TwoDChannelInstance,
+                $dma_ch: UpDma<$timer> + TwoDChannelInstance,
                 FB: FrameBuffer<Word = P::Word>,
             {
-                gpdma_2d_driver::Hub75Gpdma2d::new(
+                gpdma_2d_driver::Hub75::new(
                     tim,
                     clock_pin,
                     dma_ch,

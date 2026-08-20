@@ -20,7 +20,7 @@ embassy_stm32::bind_interrupts!(pub struct Irqs {
         hub75::Hub75DmaHandler;
 });
 
-pub type Hub75<'d, FB> = hub75::Hub75<'d, FB>;
+pub use hub75::Hub75;
 
 pub fn config() -> embassy_stm32::Config {
     // HSI (16 MHz) → PLL → 216 MHz SYSCLK.

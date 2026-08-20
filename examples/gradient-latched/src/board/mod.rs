@@ -5,14 +5,15 @@
 //!
 //! - the `embassy_stm32::Config` passed to `embassy_stm32::init` (clock
 //!   tree / PLL configuration), via `config()`
-//! - the HUB75 driver instance (the `hub75_define!` / `hub75_gpdma_define!` /
-//!   `hub75_gpdma_2d_define!` invocation), exposed as the `hub75` module
+//! - the HUB75 driver instance (a single `hub75_define!` invocation),
+//!   exposed as the `hub75` module
 //! - the DMA / GPDMA interrupt bindings (the `Irqs` struct)
-//! - a unified `Hub75` driver type alias so `main.rs` can name the driver
+//! - a `Hub75` driver type re-export so `main.rs` can name the driver
 //!   type regardless of backend
 //!
-//! The dumb DMA driver is the default backend; on STM32H563 the `gpdma` and
-//! `gpdma-2d` features switch to the linked-list backends.
+//! The dumb DMA driver is the default backend; on STM32H563 the `gpdma` /
+//! `gpdma-2d` features switch to the linked-list backends. `hub75_define!`
+//! dispatches to the matching backend at compile time.
 //!
 //! Each chip's implementation lives in its own file, selected at compile
 //! time via `#[cfg_attr(..., path = "...")]` on the private `chip` module.

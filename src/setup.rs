@@ -36,8 +36,8 @@ pub(crate) struct Hardware<'d, T: GeneralInstance4Channel> {
 
 /// Configure GPIO pins, clock pin, and timer for HUB75 PWM output.
 ///
-/// Identical setup shared by `dma::Hub75::new()`, `gpdma::Hub75Gpdma::new()`,
-/// and `gpdma_2d::Hub75Gpdma2d::new()`.
+/// Identical setup shared by `dma::Hub75::new()`, `gpdma::Hub75::new()`,
+/// and `gpdma_2d::Hub75::new()`.
 pub(crate) fn hardware<'d, T: GeneralInstance4Channel, P: Hub75Pins>(
     tim: Peri<'d, T>,
     clock_pin: Peri<'d, impl TimerPin<T, Ch1>>,
@@ -59,7 +59,7 @@ pub(crate) fn hardware<'d, T: GeneralInstance4Channel, P: Hub75Pins>(
     let max: u32 = timer.get_max_compare_value().into();
     timer.set_compare_value(
         TimChannel::Ch1,
-        (u64::from(max) * 4 / 5).try_into().unwrap(),
+        (u64::from(max) * 3 / 5).try_into().unwrap(),
     );
 
     timer.enable_channel(TimChannel::Ch1, true);

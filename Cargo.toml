@@ -32,7 +32,7 @@ embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
 # hub75-framebuffer = { version = "0.11.0" }
-hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer.git", rev = "501a03dfeec4aebf3803610b56ce499efa8feabf" }
+hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer.git", rev = "9de7b9e9e510aabe2255485009cc8ba70c984db5" }
 
 [features]
 default = []
@@ -64,6 +64,9 @@ inter-row-blank-16 = ["hub75-framebuffer/inter-row-blank-16"]
 inter-row-blank-32 = ["hub75-framebuffer/inter-row-blank-32"]
 reverse-row-order = ["hub75-framebuffer/reverse-row-order"]
 gpdma = []
+gpdma-2d = ["gpdma"]
+unsafe-swap-wait-1 = []
+unsafe-swap-wait-0 = []
 
 # only used for documentation!
 stm32f722 = ["embassy-stm32/stm32f722ze"]

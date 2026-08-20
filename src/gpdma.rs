@@ -12,10 +12,19 @@
 //!
 //! Works with **any** GPDMA channel (no 2D capability required).
 //!
-//! The ISR stops and resets the timer at each frame boundary for
-//! deterministic clock alignment, then delegates swap/restart work
-//! to [`GpdmaIsrCore::on_chain_complete()`] and
-//! [`GpdmaIsrCore::restart_chain()`].
+//! The descriptor chain is circular: the terminal item links back to
+//! `item[0]` so the chain loops forever and the GPDMA is started exactly
+//! once — no per-frame restart. Because STM32 GPDMA has no orthogonal
+//! "end-of-loop" flag (unlike ESP32's `suc_eof`), the terminal node uses
+//! `TR2.TCEM = EACH_LINKED_LIST_ITEM` (firing one TC interrupt per frame)
+//! while every other node is silent (`LAST_LINKED_LIST_ITEM`, which never
+//! fires in a circular chain). The timer free-runs; `swap()` shifts every
+//! descriptor source address directly (in a critical section) and then
+//! waits for the configured number of transfer-complete interrupts before
+//! returning the old framebuffer ([`IsrCore::on_frame()`]). By default it
+//! waits for two boundaries, guaranteeing the old framebuffer is fully
+//! drained; the `unsafe-swap-wait-1` / `unsafe-swap-wait-0` features
+//! shorten that wait at the cost of possible visual tearing.
 
 use core::cell::RefCell;
 use core::future::poll_fn;
@@ -47,7 +56,7 @@ pub use crate::bcm::MAX_SEGMENTS;
 use crate::framebuffer::{BcmSegment, FrameBuffer};
 use crate::{Config, Hub75Error, Hub75Pins};
 
-/// Re-export of [`crate::setup::TimerSlot`] for the `hub75_gpdma_define!` macro.
+/// Re-export of [`crate::setup::TimerSlot`] for the `hub75_define!` macro.
 #[doc(hidden)]
 pub use crate::setup::TimerSlot;
 
@@ -98,9 +107,9 @@ fn item_offset(item: &LinearItem) -> u16 {
 /// BCM weighting, from the framebuffer's [`BcmSegment`] sequence.
 ///
 /// For each segment, creates `reps` consecutive `LinearItem` entries
-/// pointing at the same segment data. The terminal item has `llr = 0`,
-/// which triggers a TC interrupt at the frame boundary (via
-/// `TCEM = LAST_LLI`).
+/// pointing at the same segment data. The terminal item links back to
+/// `item[0]` (making the chain circular) and uses `TCEM = EACH_LLI` to
+/// fire one TC interrupt per frame boundary.
 ///
 /// Compile-time assertion: the descriptor count computed from
 /// [`FrameBuffer::BCM_SEQUENCE`] must fit into [`MAX_DESCRIPTORS`].
@@ -142,20 +151,29 @@ pub fn build_item_chain<FB: FrameBuffer>(
         "GPDMA descriptor chain spans a 64 KB boundary"
     );
 
+    // Every node is silent (`LastLinkedListItem` — which never fires in a
+    // circular chain, because no node is ever "the last"). The terminal
+    // node instead uses `EachLinkedListItem` so exactly one TC interrupt
+    // fires per frame at the frame boundary.
     let mut config = LinearItemConfig::default();
     config.transfer_complete_mode = TransferCompleteMode::LastLinkedListItem;
+    let mut terminal_config = config;
+    terminal_config.transfer_complete_mode = TransferCompleteMode::EachLinkedListItem;
 
     let mut idx = 0;
     for i in 0..segment_count {
         let BcmSegment { ptr, len, reps } = fb.bcm_segment(i);
 
         for _ in 0..reps {
+            let is_last = idx + 1 == total;
+            let item_config = if is_last { terminal_config } else { config };
+
             // Create a write transfer item (memory → peripheral/ODR)
             // using the embassy-stm32 high-level API.
             let mut item = match word_size {
                 WordSize::OneByte => {
                     let buf = unsafe { core::slice::from_raw_parts(ptr, len) };
-                    unsafe { LinearItem::new_write(request, buf, odr_addr, config) }
+                    unsafe { LinearItem::new_write(request, buf, odr_addr, item_config) }
                 }
                 WordSize::TwoBytes => {
                     debug_assert!(
@@ -170,17 +188,17 @@ pub fn build_item_chain<FB: FrameBuffer>(
                     let buf = unsafe { core::slice::from_raw_parts(ptr.cast::<u16>(), len / 2) };
                     #[allow(clippy::cast_ptr_alignment)]
                     unsafe {
-                        LinearItem::new_write(request, buf, odr_addr.cast::<u16>(), config)
+                        LinearItem::new_write(request, buf, odr_addr.cast::<u16>(), item_config)
                     }
                 }
                 _ => panic!("HUB75 only supports byte and halfword DMA transfers"),
             };
 
-            // Link to next item if not the last.
-            if idx + 1 < total {
-                let next_offset = item_offset(&items[idx + 1]);
-                item.link_to(next_offset);
-            }
+            // Link to the next item. The terminal item links back to
+            // item[0] so the chain loops forever.
+            let next_idx = if is_last { 0 } else { idx + 1 };
+            let next_offset = item_offset(&items[next_idx]);
+            item.link_to(next_offset);
 
             items[idx] = item;
             idx += 1;
@@ -227,142 +245,61 @@ pub(crate) fn gpdma_transfer_options() -> TransferOptions {
 }
 
 // ---------------------------------------------------------------------------
-// GpdmaIsrCore — frame-boundary state (library code, no generics)
+// IsrCore — frame-boundary state (library code, no generics)
 // ---------------------------------------------------------------------------
 
-struct GpdmaIsrCoreState {
-    channel: Channel<'static>,
-    options: TransferOptions,
-    descriptor_count: usize,
-    current_fb_ptr: *const (),
-    pending_delta: Option<isize>,
-    pending_fb_ptr: *const (),
-    returned_fb_ptr: *const (),
-}
-
-// SAFETY: Raw pointers target static framebuffer allocations or are null.
-// Channel<'static> is Send (contains only a DmaChannel enum + PhantomData).
-// All access is guarded by the critical-section Mutex.
-unsafe impl Send for GpdmaIsrCoreState {}
+/// Number of frame-boundary transfer-complete interrupts `swap()` waits for
+/// after applying the descriptor delta, selected by feature. The default is
+/// two; `unsafe-swap-wait-1` / `unsafe-swap-wait-0` shorten it to one / zero.
+#[cfg(feature = "unsafe-swap-wait-0")]
+const SWAP_WAIT_COUNT: u8 = 0;
+#[cfg(all(feature = "unsafe-swap-wait-1", not(feature = "unsafe-swap-wait-0")))]
+const SWAP_WAIT_COUNT: u8 = 1;
+#[cfg(not(any(feature = "unsafe-swap-wait-0", feature = "unsafe-swap-wait-1")))]
+const SWAP_WAIT_COUNT: u8 = 2;
 
 /// Per-instance ISR core state for the GPDMA backend, shared between
-/// the ISR handler and the [`Hub75Gpdma`] driver. Created by
-/// `hub75_gpdma_define!` as a `static`.
+/// the ISR handler and the [`Hub75`] driver. Created by
+/// `hub75_define!` as a `static`.
 #[doc(hidden)]
-pub struct GpdmaIsrCore {
-    state: Mutex<RefCell<Option<GpdmaIsrCoreState>>>,
+pub struct IsrCore {
+    swap_waits: Mutex<RefCell<u8>>,
     swap_done: AtomicBool,
     swap_waker: Mutex<RefCell<Option<Waker>>>,
     frame_count: AtomicU32,
 }
 
-// SAFETY: All fields are inherently Sync (Mutex, Atomics) given
-// GpdmaIsrCoreState: Send (ensured above).
-unsafe impl Sync for GpdmaIsrCore {}
-
-impl GpdmaIsrCore {
-    /// Create a new uninitialized core. For use in `static` declarations.
+impl IsrCore {
+    /// Create a new core. For use in `static` declarations.
     #[must_use]
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
-            state: Mutex::new(RefCell::new(None)),
+            swap_waits: Mutex::new(RefCell::new(0)),
             swap_done: AtomicBool::new(false),
             swap_waker: Mutex::new(RefCell::new(None)),
             frame_count: AtomicU32::new(0),
         }
     }
 
-    /// Called from the ISR at each frame boundary (GPDMA chain complete).
+    /// Called from the ISR at each frame boundary.
     ///
-    /// Handles swap signaling and patches item SAR fields when a new
-    /// framebuffer is pending.
-    ///
-    /// # Safety
-    /// Must only be called from within a critical section, from the
-    /// GPDMA transfer-complete ISR. `items` must point to the static
-    /// item array for this instance.
-    pub unsafe fn on_chain_complete(
-        &self,
-        cs: critical_section::CriticalSection,
-        items: &mut [LinearItem; MAX_DESCRIPTORS],
-    ) {
-        let mut borrow = self.state.borrow_ref_mut(cs);
-        let Some(state) = borrow.as_mut() else { return };
-
+    /// The chain raises exactly one TC interrupt per frame (on the terminal
+    /// node). Framebuffer deltas are applied directly in [`Hub75::swap`]
+    /// rather than here, so this handler only counts the frame boundary and,
+    /// if a swap is waiting, decrements the remaining-waits counter and
+    /// signals completion once it reaches zero.
+    #[doc(hidden)]
+    pub fn on_frame(&self, cs: critical_section::CriticalSection) {
         self.frame_count.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(delta) = state.pending_delta.take() {
-            state.returned_fb_ptr = state.current_fb_ptr;
-            state.current_fb_ptr = state.pending_fb_ptr;
-            state.pending_fb_ptr = core::ptr::null();
-
-            apply_item_delta(items, state.descriptor_count, delta);
-
-            self.signal_swap_done(cs);
+        let mut swap_waits = self.swap_waits.borrow_ref_mut(cs);
+        if *swap_waits > 0 {
+            *swap_waits -= 1;
+            if *swap_waits == 0 {
+                self.signal_swap_done(cs);
+            }
         }
-    }
-
-    /// Reset and restart the GPDMA linked-list chain from item[0].
-    ///
-    /// Called from the ISR after frame-boundary processing.
-    #[doc(hidden)]
-    pub fn restart_chain(
-        &self,
-        cs: critical_section::CriticalSection,
-        table: &Table<LinearItem, MAX_DESCRIPTORS>,
-    ) {
-        let borrow = self.state.borrow_ref(cs);
-        let Some(state) = borrow.as_ref() else { return };
-        // SAFETY: called from the ISR inside a critical section — no other
-        // code is concurrently accessing the channel registers. The table
-        // is a `'static` allocation and remains valid for the transfer.
-        unsafe { state.channel.restart_linked_list(table, state.options) };
-    }
-
-    /// Called from the ISR at each frame boundary for 2D transfers.
-    ///
-    /// Same swap logic as [`on_chain_complete`](Self::on_chain_complete),
-    /// but patches `TwoDItem` SAR fields.
-    ///
-    /// # Safety
-    /// Must only be called from within a critical section, from the
-    /// GPDMA transfer-complete ISR. `items` must point to the static
-    /// 2D item array for this instance.
-    #[doc(hidden)]
-    pub unsafe fn on_chain_complete_2d(
-        &self,
-        cs: critical_section::CriticalSection,
-        items: &mut [TwoDItem; MAX_SEGMENTS],
-    ) {
-        let mut borrow = self.state.borrow_ref_mut(cs);
-        let Some(state) = borrow.as_mut() else { return };
-
-        self.frame_count.fetch_add(1, Ordering::Relaxed);
-
-        if let Some(delta) = state.pending_delta.take() {
-            state.returned_fb_ptr = state.current_fb_ptr;
-            state.current_fb_ptr = state.pending_fb_ptr;
-            state.pending_fb_ptr = core::ptr::null();
-
-            apply_item_delta_2d(items, state.descriptor_count, delta);
-
-            self.signal_swap_done(cs);
-        }
-    }
-
-    /// Reset and restart a 2D GPDMA linked-list chain from item[0].
-    ///
-    /// Called from the ISR after frame-boundary processing on 2D instances.
-    #[doc(hidden)]
-    pub fn restart_chain_2d(
-        &self,
-        cs: critical_section::CriticalSection,
-        table: &Table<TwoDItem, { MAX_SEGMENTS }>,
-    ) {
-        let borrow = self.state.borrow_ref(cs);
-        let Some(state) = borrow.as_ref() else { return };
-        unsafe { state.channel.restart_linked_list(table, state.options) };
     }
 
     /// Returns the number of complete BCM frames rendered.
@@ -370,48 +307,31 @@ impl GpdmaIsrCore {
         self.frame_count.load(Ordering::Relaxed)
     }
 
-    /// Queue a framebuffer swap and wait for the ISR to reach a frame
-    /// boundary. Returns the raw pointer to the old framebuffer.
-    ///
-    /// # Safety
-    /// `new_fb_ptr` must point to a valid `&'static mut FB`.
-    ///
-    /// # Errors
-    /// Returns `Hub75Error::NotInitialised` if the driver state has
-    /// not been set up.
-    pub async unsafe fn swap_inner(&self, new_fb_ptr: *const ()) -> Result<*const (), Hub75Error> {
-        critical_section::with(|cs| {
-            let mut borrow = self.state.borrow_ref_mut(cs);
-            let state = borrow.as_mut().ok_or(Hub75Error::NotInitialised)?;
-            // The old and new framebuffers have the same `FB` type and
-            // therefore identical layout, so every descriptor's source
-            // address shifts by the same byte delta.
-            let delta = new_fb_ptr as isize - state.current_fb_ptr as isize;
-            state.pending_delta = Some(delta);
-            state.pending_fb_ptr = new_fb_ptr;
-            self.swap_done.store(false, Ordering::Relaxed);
-            Ok(())
-        })?;
-
-        poll_fn(|cx| {
-            if self.swap_done.load(Ordering::Acquire) {
-                return Poll::Ready(());
-            }
+    /// Arm a swap wait and yield until the configured number of
+    /// frame-boundary interrupts have been observed. Called from
+    /// [`Hub75::swap`] after the descriptor delta has been applied.
+    #[doc(hidden)]
+    pub async fn wait_swap(&self) {
+        if SWAP_WAIT_COUNT != 0 {
             critical_section::with(|cs| {
-                if self.swap_done.load(Ordering::Relaxed) {
+                *self.swap_waits.borrow_ref_mut(cs) = SWAP_WAIT_COUNT;
+                self.swap_done.store(false, Ordering::Relaxed);
+            });
+
+            poll_fn(|cx| {
+                if self.swap_done.load(Ordering::Acquire) {
                     return Poll::Ready(());
                 }
-                *self.swap_waker.borrow_ref_mut(cs) = Some(cx.waker().clone());
-                Poll::Pending
+                critical_section::with(|cs| {
+                    if self.swap_done.load(Ordering::Relaxed) {
+                        return Poll::Ready(());
+                    }
+                    *self.swap_waker.borrow_ref_mut(cs) = Some(cx.waker().clone());
+                    Poll::Pending
+                })
             })
-        })
-        .await;
-
-        critical_section::with(|cs| {
-            let borrow = self.state.borrow_ref(cs);
-            let state = borrow.as_ref().ok_or(Hub75Error::NotInitialised)?;
-            Ok(state.returned_fb_ptr)
-        })
+            .await;
+        }
     }
 
     fn signal_swap_done(&self, cs: critical_section::CriticalSection) {
@@ -420,32 +340,10 @@ impl GpdmaIsrCore {
             waker.wake();
         }
     }
-
-    #[doc(hidden)]
-    pub fn init_state(
-        &self,
-        cs: critical_section::CriticalSection,
-        channel: Channel<'static>,
-        options: TransferOptions,
-        descriptor_count: usize,
-        fb_ptr: *const (),
-    ) {
-        *self.state.borrow_ref_mut(cs) = Some(GpdmaIsrCoreState {
-            channel,
-            options,
-            descriptor_count,
-            current_fb_ptr: fb_ptr,
-            pending_delta: None,
-            pending_fb_ptr: core::ptr::null(),
-            returned_fb_ptr: core::ptr::null(),
-        });
-        self.swap_done.store(false, Ordering::Relaxed);
-        self.frame_count.store(0, Ordering::Relaxed);
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Hub75Gpdma — public driver handle (library code, generic over T and FB)
+// Hub75 — public driver handle (library code, generic over T and FB)
 // ---------------------------------------------------------------------------
 
 /// HUB75 LED matrix controller driven by a GPDMA linked-list refresh
@@ -456,15 +354,27 @@ impl GpdmaIsrCore {
 /// traverses the chain autonomously; one ISR fires per complete
 /// BCM frame.
 ///
-/// Created via the `hub75_gpdma_define!` macro's generated `init()`
-/// function. Use [`Hub75Gpdma::swap()`] to double-buffer.
-pub struct Hub75Gpdma<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> {
+/// Created via the `hub75_define!` macro's generated `init()`
+/// function. Use [`Hub75::swap()`] to double-buffer.
+pub struct Hub75<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> {
     _clock_pin: PwmPin<'d, T, Ch1>,
-    core: &'static GpdmaIsrCore,
+    core: &'static IsrCore,
+    items: *mut [LinearItem; MAX_DESCRIPTORS],
+    descriptor_count: usize,
+    current_fb_ptr: *const (),
     _fb: PhantomData<&'static FB>,
 }
 
-impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T, FB> {
+// SAFETY: `items` points at this instance's `static` descriptor table and
+// `current_fb_ptr` points at a `'static` framebuffer — both outlive the
+// driver handle. `FB: Sync` preserves the bound previously implied by
+// `PhantomData<&'static FB>`.
+unsafe impl<T: GeneralInstance4Channel, FB: FrameBuffer + 'static + Sync> Send
+    for Hub75<'_, T, FB>
+{
+}
+
+impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB> {
     /// Create a new GPDMA-backed HUB75 driver, configure hardware,
     /// and start rendering.
     ///
@@ -479,7 +389,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
         pins: P,
         config: Config,
         fb: &'static mut FB,
-        core: &'static GpdmaIsrCore,
+        core: &'static IsrCore,
         timer_slot: &'static TimerSlot<T>,
         items: &'static mut Table<LinearItem, MAX_DESCRIPTORS>,
     ) -> Self
@@ -494,6 +404,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
 
         // --- Build the linked-list descriptor chain ---
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
+
+        // Capture a raw pointer to the descriptor table so swap() can patch
+        // SAR fields after `items` has been handed to the linked-list transfer.
+        let items_ptr = core::ptr::from_mut(&mut items.items);
 
         let descriptor_count =
             build_item_chain(&mut items.items, fb, odr_addr, P::DMA_WORD_SIZE, request);
@@ -521,14 +435,15 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
             let transfer = unsafe { channel.linked_list(items, options) };
             core::mem::forget(transfer);
 
-            core.init_state(cs, channel, options, descriptor_count, fb_ptr);
-
             timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
 
         Self {
             _clock_pin: hw.clock_pin,
             core,
+            items: items_ptr,
+            descriptor_count,
+            current_fb_ptr: fb_ptr,
             _fb: PhantomData,
         }
     }
@@ -541,53 +456,85 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
 
     /// Replace the displayed framebuffer, returning the previously-displayed one.
     ///
-    /// Queues `new_fb` for display and yields until the ISR reaches a
-    /// frame boundary, at which point all descriptor source addresses
-    /// are shifted to the new framebuffer atomically. Returns an
-    /// exclusive reference to the old framebuffer that is no longer
-    /// being read by the GPDMA.
+    /// Immediately shifts every descriptor source address to `new_fb`, then
+    /// yields until the configured number of transfer-complete interrupts
+    /// have been observed before returning the old framebuffer. By default it
+    /// waits for two boundaries, after which the old framebuffer is
+    /// guaranteed to no longer be read by the GPDMA; the
+    /// `unsafe-swap-wait-1` / `unsafe-swap-wait-0` features shorten the wait
+    /// (see the crate-level feature docs).
     ///
     /// # Errors
-    /// Returns `Hub75Error::NotInitialised` if the driver has not
-    /// been initialised.
+    ///
+    /// This method is infallible for the GPDMA backends (a [`Hub75`] handle
+    /// only exists after initialisation); the `Result` return is kept for API
+    /// consistency with the plain-DMA backend.
     pub async fn swap(&mut self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
-        let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
-        let old_ptr = unsafe { self.core.swap_inner(fb_ptr).await? };
+        let new_fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
+
+        // The old and new framebuffers have the same `FB` type and therefore
+        // identical layout, so every descriptor's source address shifts by the
+        // same byte delta.
+        let delta = new_fb_ptr as isize - self.current_fb_ptr as isize;
+        let old_ptr = self.current_fb_ptr;
+        self.current_fb_ptr = new_fb_ptr;
+
+        if delta != 0 {
+            // SAFETY: `self.items` points at this instance's `static`
+            // descriptor table, captured before the table was handed to the
+            // forgotten linked-list transfer. `swap` holds `&mut self`, so
+            // this is the only CPU-side writer; the sole concurrent reader is
+            // the GPDMA, which reads a descriptor's SAR as it loads that item
+            // — a single-word store cannot race a torn read.
+            unsafe {
+                apply_item_delta(&mut *self.items, self.descriptor_count, delta);
+            }
+        }
+
+        self.core.wait_swap().await;
+
+        // SAFETY: `old_ptr` is the previously-displayed `&'static mut FB`,
+        // handed back exclusively and no longer read by the GPDMA.
         Ok(unsafe { &mut *(old_ptr as *mut FB) })
     }
 }
 
 // ---------------------------------------------------------------------------
-// hub75_gpdma_define! macro
+// hub75_define! macro
 // ---------------------------------------------------------------------------
 
 /// Define a GPDMA-backed HUB75 driver instance with its own timer
 /// static, descriptor table, and ISR handler.
 ///
 /// Each invocation creates a public module containing:
-/// - `Hub75GpdmaHandler` — the GPDMA interrupt handler for `bind_interrupts!`
-/// - `Hub75Gpdma<'d, FB>` — a type alias for the driver
+/// - `Hub75DmaHandler` — the GPDMA interrupt handler for `bind_interrupts!`
+/// - `Hub75<'d, FB>` — a type alias for the driver
 /// - `init()` — constructs and starts the driver
 ///
 /// BCM weighting is achieved by duplicating `LinearItem` descriptors
 /// in the chain. Any GPDMA channel works (2D capability not required).
 ///
+/// The descriptor chain is circular: the GPDMA is started once and loops
+/// forever, and the terminal linked-list node fires one TC interrupt per
+/// frame boundary. The pixel-clock timer free-runs — there is no per-frame
+/// stop/reset/restart.
+///
 /// # Parameters
 /// - `$mod_name` — name of the generated module
 /// - `$timer` — the concrete timer peripheral type
-/// - `$dma_ch` — the GPDMA channel peripheral name (e.g. `GPDMA1_CH0`)
+/// - `$dma_ch` — the GPDMA channel peripheral type (e.g. `peripherals::GPDMA1_CH0`)
 ///
 /// # Example
 /// ```ignore
 /// use embassy_stm32::{bind_interrupts, dma, peripherals};
-/// use embassy_stm32_hub75::hub75_gpdma_define;
+/// use embassy_stm32_hub75::hub75_define;
 ///
-/// hub75_gpdma_define!(hub75, peripherals::TIM2, GPDMA1_CH0);
+/// hub75_define!(hub75, peripherals::TIM2, peripherals::GPDMA1_CH0);
 ///
 /// bind_interrupts!(struct Irqs {
 ///     GPDMA1_CHANNEL0 =>
 ///         dma::InterruptHandler<peripherals::GPDMA1_CH0>,
-///         hub75::Hub75GpdmaHandler;
+///         hub75::Hub75DmaHandler;
 /// });
 ///
 /// let hub75 = hub75::init(
@@ -596,9 +543,10 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75Gpdma<'d, T
 ///     fb0,
 /// );
 /// ```
+#[cfg(all(feature = "gpdma", not(feature = "gpdma-2d")))]
 #[macro_export]
-macro_rules! hub75_gpdma_define {
-    ($mod_name:ident, $timer:ty, $dma_ch:ident) => {
+macro_rules! hub75_define {
+    ($mod_name:ident, $timer:ty, $dma_ch:ty) => {
         #[allow(non_snake_case)]
         pub mod $mod_name {
             use $crate::__macro_support::critical_section;
@@ -608,49 +556,41 @@ macro_rules! hub75_gpdma_define {
             use $crate::__macro_support::embassy_stm32::timer::{Ch1, TimerPin, UpDma};
             use $crate::__macro_support::embassy_stm32::Peri;
             use $crate::framebuffer::FrameBuffer;
-            use $crate::gpdma::{self as gpdma_driver, GpdmaIsrCore, TimerSlot};
-
-            type DmaCh = $crate::__macro_support::embassy_stm32::peripherals::$dma_ch;
+            use $crate::gpdma::{self as gpdma_driver, IsrCore, TimerSlot};
 
             static TIMER: TimerSlot<$timer> =
                 critical_section::Mutex::new(core::cell::RefCell::new(None));
 
-            static CORE: GpdmaIsrCore = GpdmaIsrCore::new();
+            static CORE: IsrCore = IsrCore::new();
 
             static mut ITEMS: Table<LinearItem, { $crate::gpdma::MAX_DESCRIPTORS }> = Table {
                 items: [$crate::gpdma::zeroed_linear_item(); $crate::gpdma::MAX_DESCRIPTORS],
             };
 
             /// GPDMA interrupt handler for this HUB75 instance.
-            pub struct Hub75GpdmaHandler;
+            pub struct Hub75DmaHandler;
 
-            impl Handler<<DmaCh as ChannelInstance>::Interrupt> for Hub75GpdmaHandler {
+            impl Handler<<$dma_ch as ChannelInstance>::Interrupt> for Hub75DmaHandler {
                 unsafe fn on_interrupt() {
                     critical_section::with(|cs| {
-                        let mut t = TIMER.borrow_ref_mut(cs);
-                        let timer = match t.as_mut() {
-                            Some(t) => t,
-                            None => return,
-                        };
+                        // Guard: only act once init() has stored the timer.
+                        if TIMER.borrow_ref(cs).is_none() {
+                            return;
+                        }
 
-                        timer.stop();
-                        timer.reset();
-
-                        // SAFETY: ITEMS is only mutated here (in this ISR,
-                        // inside a critical section) and during init (before
-                        // interrupts are enabled for this channel).
-                        CORE.on_chain_complete(cs, unsafe { &mut ITEMS.items });
-
-                        CORE.restart_chain(cs, unsafe { &ITEMS });
-
-                        timer.start();
+                        // The chain loops forever, so there is no timer/DMA
+                        // restart — a single TC on the terminal node drives
+                        // the frame boundary. Framebuffer deltas are applied
+                        // in swap() (not here), so the ISR only counts the
+                        // boundary.
+                        CORE.on_frame(cs);
                     });
                 }
             }
 
             /// Type alias for the GPDMA-backed HUB75 driver bound to
             /// this instance's timer.
-            pub type Hub75Gpdma<'d, FB> = gpdma_driver::Hub75Gpdma<'d, $timer, FB>;
+            pub type Hub75<'d, FB> = gpdma_driver::Hub75<'d, $timer, FB>;
 
             /// Initialize the GPDMA-backed HUB75 driver, configure
             /// hardware, and start rendering from the provided
@@ -658,23 +598,23 @@ macro_rules! hub75_gpdma_define {
             pub fn init<'d, P: $crate::Hub75Pins, FB>(
                 tim: Peri<'d, $timer>,
                 clock_pin: Peri<'d, impl TimerPin<$timer, Ch1>>,
-                dma_ch: Peri<'d, DmaCh>,
+                dma_ch: Peri<'d, $dma_ch>,
                 dma_irq: impl Binding<
-                        <DmaCh as ChannelInstance>::Interrupt,
-                        dma::InterruptHandler<DmaCh>,
+                        <$dma_ch as ChannelInstance>::Interrupt,
+                        dma::InterruptHandler<$dma_ch>,
                     > + Binding<
-                        <DmaCh as ChannelInstance>::Interrupt,
-                        Hub75GpdmaHandler,
+                        <$dma_ch as ChannelInstance>::Interrupt,
+                        Hub75DmaHandler,
                     > + 'd,
                 pins: P,
                 config: $crate::Config,
                 fb: &'static mut FB,
-            ) -> Hub75Gpdma<'d, FB>
+            ) -> Hub75<'d, FB>
             where
-                DmaCh: UpDma<$timer>,
+                $dma_ch: UpDma<$timer>,
                 FB: FrameBuffer<Word = P::Word>,
             {
-                gpdma_driver::Hub75Gpdma::new(
+                gpdma_driver::Hub75::new(
                     tim,
                     clock_pin,
                     dma_ch,

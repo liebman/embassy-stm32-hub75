@@ -11,7 +11,7 @@
 //!
 //! The ISR runs the BCM refresh loop; the async `swap()` method exchanges
 //! framebuffers without blocking. The display task draws a gradient plus
-//! refresh-rate, render-rate, and simple-counter overlays.
+//! refresh-rate, render-time, and simple-counter overlays.
 //!
 //! Pin wiring (identical for both targets):
 //!   PD0: R1      PD4: G2
@@ -49,6 +49,9 @@ use heapless::String;
 use panic_probe as _;
 use static_cell::StaticCell;
 
+#[cfg(feature = "row")]
+use embassy_stm32_hub75::framebuffer::bitplane::latched::row::DmaFrameBuffer;
+#[cfg(not(feature = "row"))]
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
 // `bcm_rep_count` is used by the dumb and GPDMA-linear backends;
@@ -62,17 +65,18 @@ use embassy_stm32_hub75::{Color, Config, Hertz, Hub75Pins8};
 const ROWS: usize = 64;
 const COLS: usize = 64;
 const NROWS: usize = compute_rows(ROWS);
-const PLANES: usize = 6;
+const PLANES: usize = 4;
 
 // Pixel clock: 10 MHz by default, 20 MHz with the `20mhz` feature.
 #[cfg(not(feature = "20mhz"))]
-const PIXEL_CLOCK: Hertz = Hertz(10_000_000);
+const PIXEL_CLOCK: Hertz = Hertz(5_000_000);
 #[cfg(feature = "20mhz")]
 const PIXEL_CLOCK: Hertz = Hertz(20_000_000);
 
 const LINE1: i32 = ROWS as i32 - 1 - 14;
 const LINE2: i32 = ROWS as i32 - 1 - 7;
 const LINE3: i32 = ROWS as i32 - 1;
+const RIGHT_EDGE: i32 = COLS as i32 - 1;
 const NBARS: i32 = ROWS as i32 / 8;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
@@ -80,7 +84,7 @@ type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 static FB0: StaticCell<FBType> = StaticCell::new();
 static FB1: StaticCell<FBType> = StaticCell::new();
 
-static RENDER_RATE: AtomicU32 = AtomicU32::new(0);
+static RENDER_MS: AtomicU32 = AtomicU32::new(0);
 static SIMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[embassy_executor::task]
@@ -117,12 +121,24 @@ async fn display_task(mut hub75: board::Hub75<'static, FBType>, mut fb: &'static
 
         let mut buffer: String<64> = String::new();
 
-        fmt::write(&mut buffer, format_args!("Refresh: {:4}", refresh_rate)).unwrap();
+        // Labels: left-aligned against the panel's left edge.
+        Text::with_alignment("Refresh:", Point::new(0, LINE3), fps_style, Alignment::Left)
+            .draw(fb)
+            .unwrap();
+        Text::with_alignment("Render:", Point::new(0, LINE2), fps_style, Alignment::Left)
+            .draw(fb)
+            .unwrap();
+        Text::with_alignment("Simple:", Point::new(0, LINE1), fps_style, Alignment::Left)
+            .draw(fb)
+            .unwrap();
+
+        // Values: right-aligned against the panel's right edge.
+        fmt::write(&mut buffer, format_args!("{}", refresh_rate)).unwrap();
         Text::with_alignment(
             buffer.as_str(),
-            Point::new(0, LINE3),
+            Point::new(RIGHT_EDGE, LINE3),
             fps_style,
-            Alignment::Left,
+            Alignment::Right,
         )
         .draw(fb)
         .unwrap();
@@ -130,14 +146,14 @@ async fn display_task(mut hub75: board::Hub75<'static, FBType>, mut fb: &'static
         buffer.clear();
         fmt::write(
             &mut buffer,
-            format_args!("Render: {:5}", RENDER_RATE.load(Ordering::Relaxed)),
+            format_args!("{}ms", RENDER_MS.load(Ordering::Relaxed)),
         )
         .unwrap();
         Text::with_alignment(
             buffer.as_str(),
-            Point::new(0, LINE2),
+            Point::new(RIGHT_EDGE, LINE2),
             fps_style,
-            Alignment::Left,
+            Alignment::Right,
         )
         .draw(fb)
         .unwrap();
@@ -145,14 +161,14 @@ async fn display_task(mut hub75: board::Hub75<'static, FBType>, mut fb: &'static
         buffer.clear();
         fmt::write(
             &mut buffer,
-            format_args!("Simple: {:5}", SIMPLE_COUNTER.load(Ordering::Relaxed)),
+            format_args!("{}", SIMPLE_COUNTER.load(Ordering::Relaxed)),
         )
         .unwrap();
         Text::with_alignment(
             buffer.as_str(),
-            Point::new(0, LINE1),
+            Point::new(RIGHT_EDGE, LINE1),
             fps_style,
-            Alignment::Left,
+            Alignment::Right,
         )
         .draw(fb)
         .unwrap();
@@ -161,8 +177,10 @@ async fn display_task(mut hub75: board::Hub75<'static, FBType>, mut fb: &'static
 
         render_count += 1;
         const FPS_INTERVAL: Duration = Duration::from_secs(1);
-        if start.elapsed() > FPS_INTERVAL {
-            RENDER_RATE.store(render_count, Ordering::Relaxed);
+        let elapsed = start.elapsed();
+        if elapsed > FPS_INTERVAL {
+            let elapsed_ms = elapsed.as_millis() as u32;
+            RENDER_MS.store(elapsed_ms / render_count.max(1), Ordering::Relaxed);
             let current_frame_count = hub75.frame_count();
             refresh_rate = current_frame_count.wrapping_sub(refresh_count_start);
             refresh_count_start = current_frame_count;

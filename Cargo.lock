@@ -79,7 +79,7 @@ checksum = "c0cb6f3d4773a2107b94cbeccaa5b5f0b35a88389b5d522d13d659f64317b22d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -578,7 +578,7 @@ dependencies = [
 [[package]]
 name = "hub75-framebuffer"
 version = "0.11.0"
-source = "git+https://github.com/liebman/hub75-framebuffer.git?rev=501a03dfeec4aebf3803610b56ce499efa8feabf#501a03dfeec4aebf3803610b56ce499efa8feabf"
+source = "git+https://github.com/liebman/hub75-framebuffer.git?rev=9de7b9e9e510aabe2255485009cc8ba70c984db5#9de7b9e9e510aabe2255485009cc8ba70c984db5"
 dependencies = [
  "bitfield 0.19.5",
  "defmt 1.1.1",
@@ -812,9 +812,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -838,7 +838,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]

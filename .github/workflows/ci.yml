@@ -35,7 +35,7 @@ jobs:
       matrix:
         chip: [stm32f722, stm32h723, stm32wl55, stm32u575, stm32h563]
         # Leading comma keeps the feature list well-formed when empty.
-        extra: ["", ",gpdma"]
+        extra: ["", ",gpdma", ",gpdma-2d"]
         include:
           - { chip: stm32f722, target: thumbv7em-none-eabi }
           - { chip: stm32h723, target: thumbv7em-none-eabihf }
@@ -43,10 +43,13 @@ jobs:
           - { chip: stm32u575, target: thumbv8m.main-none-eabihf }
           - { chip: stm32h563, target: thumbv8m.main-none-eabihf }
         exclude:
-          # gpdma is only available on the GPDMA-capable chips.
+          # gpdma / gpdma-2d are only available on the GPDMA-capable chips.
           - { chip: stm32f722, extra: ",gpdma" }
           - { chip: stm32h723, extra: ",gpdma" }
           - { chip: stm32wl55, extra: ",gpdma" }
+          - { chip: stm32f722, extra: ",gpdma-2d" }
+          - { chip: stm32h723, extra: ",gpdma-2d" }
+          - { chip: stm32wl55, extra: ",gpdma-2d" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

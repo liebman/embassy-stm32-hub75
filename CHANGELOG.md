@@ -11,13 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚠️ Breaking
 
-* Updated to the new `hub75-framebuffer` `FrameBuffer` API: the BCM scan sequence is now described as an ordered list of `BcmSegment`s (`bcm_segment()` / `bcm_segment_count()`, with `BCM_SEGMENT_SHAPES` / `BCM_SEQUENCE_LEN` / `BCM_SEQUENCE_COUNT` consts) instead of exposing per-plane pointers (`plane_ptr_len()` / `plane_count()`). Bitplane framebuffers are now LSB-first with suffix-coalesced segments, halving the number of DMA transfers per refresh. Framebuffer swaps are performed via pointer delta at the frame boundary instead of re-extracting plane pointers.
 * Renamed blank delay features from `blank-delay-1/2/4/8` to separate `lead-blank-1/2/4/8/16` and `trail-blank-1/2/4/8/16` features. The lead blank delay controls how many clock cycles the output is blanked before the row address is changed, and the trail blank delay controls blanking after the row address is changed. The new `16` value is also available. Default is 1 for plain framebuffers and 0 for latched framebuffers (which handle timing via extra `Address` entries to manage the address change).
 
 ### Added
 
 * Support for row-major bitplane framebuffers (`framebuffer::bitplane::{plain,latched}::row::DmaFrameBuffer`): the basic DMA and GPDMA 2D backends drive them directly; the GPDMA linear backend is limited to sequences of at most `gpdma::MAX_DESCRIPTORS` (255) descriptors.
 * New feature passthroughs: `lead-blank-32`, `trail-blank-32`, `inter-row-blank-4/8/16/32`, and `reverse-row-order`.
+* New features `unsafe-swap-wait-1` and `unsafe-swap-wait-0` to shorten the GPDMA `swap()` wait to one / zero transfer-complete interrupts (opt-in; may cause visual tearing).
+
+### Changed
+
+* The GPDMA backends (`gpdma` / `gpdma-2d`) now apply the framebuffer swap delta directly in `swap()` and wait for the configured number of transfer-complete interrupts (two by default) before returning the old framebuffer.
 
 ## [0.2.0] - 2026-07-04
 

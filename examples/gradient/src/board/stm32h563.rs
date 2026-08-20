@@ -8,49 +8,22 @@ use embassy_stm32::rcc::{
 use embassy_stm32::dma;
 use embassy_stm32::peripherals;
 
-// Default backend: the dumb DMA driver on a GPDMA channel.
-#[cfg(not(any(feature = "gpdma", feature = "gpdma-2d")))]
+// The backend is selected at compile time by the `gpdma` / `gpdma-2d`
+// features (dumb DMA is the default); `hub75_define!` dispatches to the
+// matching backend.
 embassy_stm32_hub75::hub75_define!(
     hub75,
     embassy_stm32::peripherals::TIM1,
     embassy_stm32::peripherals::GPDMA1_CH7
 );
 
-#[cfg(feature = "gpdma")]
-embassy_stm32_hub75::hub75_gpdma_define!(hub75, embassy_stm32::peripherals::TIM1, GPDMA1_CH7);
-
-#[cfg(feature = "gpdma-2d")]
-embassy_stm32_hub75::hub75_gpdma_2d_define!(hub75, embassy_stm32::peripherals::TIM1, GPDMA1_CH7);
-
-#[cfg(not(any(feature = "gpdma", feature = "gpdma-2d")))]
 embassy_stm32::bind_interrupts!(pub struct Irqs {
     GPDMA1_CHANNEL7 =>
         dma::InterruptHandler<peripherals::GPDMA1_CH7>,
         hub75::Hub75DmaHandler;
 });
 
-#[cfg(feature = "gpdma")]
-embassy_stm32::bind_interrupts!(pub struct Irqs {
-    GPDMA1_CHANNEL7 =>
-        dma::InterruptHandler<peripherals::GPDMA1_CH7>,
-        hub75::Hub75GpdmaHandler;
-});
-
-#[cfg(feature = "gpdma-2d")]
-embassy_stm32::bind_interrupts!(pub struct Irqs {
-    GPDMA1_CHANNEL7 =>
-        dma::InterruptHandler<peripherals::GPDMA1_CH7>,
-        hub75::Hub75Gpdma2dHandler;
-});
-
-#[cfg(not(any(feature = "gpdma", feature = "gpdma-2d")))]
-pub type Hub75<'d, FB> = hub75::Hub75<'d, FB>;
-
-#[cfg(feature = "gpdma")]
-pub type Hub75<'d, FB> = hub75::Hub75Gpdma<'d, FB>;
-
-#[cfg(feature = "gpdma-2d")]
-pub type Hub75<'d, FB> = hub75::Hub75Gpdma2d<'d, FB>;
+pub use hub75::Hub75;
 
 pub fn config() -> embassy_stm32::Config {
     // HSE (8 MHz on Nucleo-H563ZI) → PLL → 250 MHz SYSCLK.
