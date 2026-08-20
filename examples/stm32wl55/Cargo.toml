@@ -54,3 +54,6 @@ embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "82560
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+
+# [patch."https://github.com/liebman/hub75-framebuffer.git"]
+# hub75-framebuffer = { path = "../../../hub75-framebuffer" }

@@ -21,18 +21,62 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
       - run: cargo fmt --check
-        working-directory: examples/stm32f722
+        working-directory: examples/gradient
       - run: cargo fmt --check
-        working-directory: examples/stm32wl55
-      - run: cargo fmt --check
-        working-directory: examples/stm32h563
+        working-directory: examples/gradient-latched
 
+  # Clippy the embassy-stm32-hub75 library across every chip, plus the GPDMA
+  # backend on the GPDMA-capable chips (stm32u575 / stm32h563).
   clippy:
-    name: Clippy (${{ matrix.example }})
+    name: Clippy lib (${{ matrix.chip }}${{ matrix.extra }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        example: [examples/stm32f722, examples/stm32h723, examples/stm32wl55, examples/stm32h563]
+        chip: [stm32f722, stm32h723, stm32wl55, stm32u575, stm32h563]
+        # Leading comma keeps the feature list well-formed when empty.
+        extra: ["", ",gpdma"]
+        include:
+          - { chip: stm32f722, target: thumbv7em-none-eabi }
+          - { chip: stm32h723, target: thumbv7em-none-eabihf }
+          - { chip: stm32wl55, target: thumbv7em-none-eabi }
+          - { chip: stm32u575, target: thumbv8m.main-none-eabihf }
+          - { chip: stm32h563, target: thumbv8m.main-none-eabihf }
+        exclude:
+          # gpdma is only available on the GPDMA-capable chips.
+          - { chip: stm32f722, extra: ",gpdma" }
+          - { chip: stm32h723, extra: ",gpdma" }
+          - { chip: stm32wl55, extra: ",gpdma" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7em-none-eabi,thumbv7em-none-eabihf,thumbv8m.main-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+      - run: cargo clippy --locked --target ${{ matrix.target }} --features "${{ matrix.chip }}${{ matrix.extra }}" -- -D warnings
+
+  # Clippy each example crate on every board it supports, including the GPDMA
+  # backends for stm32h563. Driven by the clippy-* aliases each example defines
+  # in its own .cargo/config.toml.
+  clippy-examples:
+    name: Clippy examples (${{ matrix.example }} ${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: &example-matrix
+          - { example: examples/gradient,         board: f722, label: f722,          features: "" }
+          - { example: examples/gradient,         board: h723, label: h723,          features: "" }
+          - { example: examples/gradient,         board: h563, label: h563,          features: "" }
+          - { example: examples/gradient,         board: h563, label: "h563 gpdma",    features: "-F gpdma" }
+          - { example: examples/gradient,         board: h563, label: "h563 gpdma-2d", features: "-F gpdma-2d" }
+          - { example: examples/gradient-latched, board: f722, label: f722,          features: "" }
+          - { example: examples/gradient-latched, board: h563, label: h563,          features: "" }
+          - { example: examples/gradient-latched, board: h563, label: "h563 gpdma",    features: "-F gpdma" }
+          - { example: examples/gradient-latched, board: h563, label: "h563 gpdma-2d", features: "-F gpdma-2d" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,15 +86,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.example }}
-      - run: cargo clippy --locked -- -D warnings
+      - run: cargo clippy-${{ matrix.board }} ${{ matrix.features }} --locked -- -D warnings
         working-directory: ${{ matrix.example }}
 
   build-locked:
-    name: Build Locked (${{ matrix.example }})
+    name: Build locked (${{ matrix.example }} ${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        example: [examples/stm32f722, examples/stm32wl55, examples/stm32h723, examples/stm32h563]
+        include: *example-matrix
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -59,15 +104,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.example }}
-      - run: cargo build --locked
+      - run: cargo build-${{ matrix.board }} ${{ matrix.features }} --locked
         working-directory: ${{ matrix.example }}
 
   build-latest-deps:
-    name: Build Latest Deps (${{ matrix.example }})
+    name: Build latest deps (${{ matrix.example }} ${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        example: [examples/stm32f722, examples/stm32wl55, examples/stm32h723, examples/stm32h563]
+        include: *example-matrix
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,5 +124,5 @@ jobs:
           workspaces: ${{ matrix.example }}
       - run: cargo update
         working-directory: ${{ matrix.example }}
-      - run: cargo build
+      - run: cargo build-${{ matrix.board }} ${{ matrix.features }}
         working-directory: ${{ matrix.example }}

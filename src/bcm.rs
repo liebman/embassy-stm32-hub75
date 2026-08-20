@@ -79,9 +79,7 @@ impl SegmentCache {
 /// Extract the BCM segment sequence from a framebuffer into `cache`.
 ///
 /// Compile-time assertion: the framebuffer's static segment count must fit
-/// into [`MAX_SEGMENTS`] (evaluated per monomorphisation). Debug builds
-/// additionally validate the runtime segments against the framebuffer's
-/// static [`FrameBuffer::BCM_SEGMENT_SHAPES`].
+/// into [`MAX_SEGMENTS`] (evaluated per monomorphisation).
 #[doc(hidden)]
 pub fn segments_from_fb_into<FB: FrameBuffer>(fb: &FB, cache: &mut SegmentCache) {
     const {
@@ -100,17 +98,6 @@ pub fn segments_from_fb_into<FB: FrameBuffer>(fb: &FB, cache: &mut SegmentCache)
         debug_assert!(
             !segment.ptr.is_null(),
             "segment {i} returned a null pointer"
-        );
-        // Verify that the runtime segment agrees with the static shape
-        // array (catches `FrameBuffer` implementations whose `bcm_segment()`
-        // and `BCM_SEGMENT_SHAPES` are out of sync).
-        debug_assert!(
-            {
-                let (shape_len, shape_reps) = FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN];
-                segment.len == shape_len && segment.reps == shape_reps
-            },
-            "bcm_segment({i}) disagrees with BCM_SEGMENT_SHAPES {:?}",
-            FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN],
         );
         *slot = segment;
     }

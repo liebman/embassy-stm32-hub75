@@ -1,20 +1,32 @@
-//! Example: HUB75 latched panel on PD0-PD7 with TIM1 CLK on PE9.
+//! Embassy (async) HUB75 latched demo driving a 64x64 panel with an 8-bit
+//! bitplane framebuffer and a SmartLEDShield-style latch circuit.
 //!
-//! Draws gradient bars + FPS counters on a 64x64 panel using bitplane latched
-//! framebuffer with ISR-driven continuous rendering and double buffering.
+//! Select the target board with exactly one of the `stm32f722` or
+//! `stm32h563` features. The dumb DMA driver is the default backend; on
+//! `stm32h563`, add the `gpdma` (linear linked-list) or `gpdma-2d` (2D)
+//! feature to switch to a linked-list backend.
 //!
-//! Pin wiring:
-//!   PD0:  R1      PD4: G2
-//!   PD1:  G1      PD5: B2
-//!   PD2:  B1      PD6: LATCH
-//!   PD3:  R2      PD7: BLANK/OE
-//!   PE9:  CLK (TIM1)
+//! The pixel clock defaults to 10 MHz; enable the `20mhz` feature for a
+//! 20 MHz pixel clock.
 //!
-//! DMA2 Channel 5 is used for framebuffer → GPIO transfers, triggered
-//! by TIM1 update events. The ISR-driven refresh loop runs autonomously.
+//! The ISR runs the BCM refresh loop; the async `swap()` method exchanges
+//! framebuffers without blocking. The display task draws a gradient plus
+//! refresh-rate, render-rate, and simple-counter overlays.
+//!
+//! Pin wiring (identical for both targets):
+//!   PD0: R1      PD4: G2
+//!   PD1: G1      PD5: B2
+//!   PD2: B1      PD6: LATCH
+//!   PD3: R2      PD7: BLANK/OE
+//!   PE9: CLK (TIM1 CH1)
+//!
+//! Note that you most likely need level converters 3.3v to 5v for all HUB75
+//! signals.
 
 #![no_std]
 #![no_main]
+
+mod board;
 
 use core::fmt;
 use core::sync::atomic::AtomicU32;
@@ -24,11 +36,6 @@ use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::rcc::{
-    AHBPrescaler, APBPrescaler, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv, PllRDiv, PllSource,
-    Sysclk,
-};
-use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::Timer;
 use embassy_time::{Duration, Instant};
 use embedded_graphics::geometry::Point;
@@ -44,12 +51,24 @@ use static_cell::StaticCell;
 
 use embassy_stm32_hub75::framebuffer::bitplane::latched::DmaFrameBuffer;
 use embassy_stm32_hub75::framebuffer::compute_rows;
-use embassy_stm32_hub75::{hub75_define, Color, Config, Hertz, Hub75Pins8};
+// `bcm_rep_count` is used by the dumb and GPDMA-linear backends;
+// `FrameBuffer` (for `BCM_SEGMENT_COUNT`) by the dumb and GPDMA-2D backends.
+#[cfg(not(feature = "gpdma-2d"))]
+use embassy_stm32_hub75::framebuffer::bcm_rep_count;
+#[cfg(not(feature = "gpdma"))]
+use embassy_stm32_hub75::framebuffer::FrameBuffer;
+use embassy_stm32_hub75::{Color, Config, Hertz, Hub75Pins8};
 
 const ROWS: usize = 64;
 const COLS: usize = 64;
 const NROWS: usize = compute_rows(ROWS);
 const PLANES: usize = 6;
+
+// Pixel clock: 10 MHz by default, 20 MHz with the `20mhz` feature.
+#[cfg(not(feature = "20mhz"))]
+const PIXEL_CLOCK: Hertz = Hertz(10_000_000);
+#[cfg(feature = "20mhz")]
+const PIXEL_CLOCK: Hertz = Hertz(20_000_000);
 
 const LINE1: i32 = ROWS as i32 - 1 - 14;
 const LINE2: i32 = ROWS as i32 - 1 - 7;
@@ -58,18 +77,6 @@ const NBARS: i32 = ROWS as i32 / 8;
 
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
 
-hub75_define!(
-    hub75,
-    embassy_stm32::peripherals::TIM1,
-    embassy_stm32::peripherals::DMA2_CH5
-);
-
-bind_interrupts!(struct Irqs {
-    DMA2_STREAM5 =>
-        dma::InterruptHandler<peripherals::DMA2_CH5>,
-        hub75::Hub75DmaHandler;
-});
-
 static FB0: StaticCell<FBType> = StaticCell::new();
 static FB1: StaticCell<FBType> = StaticCell::new();
 
@@ -77,7 +84,7 @@ static RENDER_RATE: AtomicU32 = AtomicU32::new(0);
 static SIMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[embassy_executor::task]
-async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static mut FBType) {
+async fn display_task(mut hub75: board::Hub75<'static, FBType>, mut fb: &'static mut FBType) {
     info!("display_task: starting!");
     let fps_style = MonoTextStyleBuilder::new()
         .font(&FONT_5X7)
@@ -165,29 +172,54 @@ async fn display_task(mut hub75: hub75::Hub75<'static, FBType>, mut fb: &'static
     }
 }
 
+unsafe extern "C" {
+    // Provided by the cortex-m-rt linker script
+    static _stack_start: u32;
+    static _stack_end: u32;
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Starting main");
-    let mut config = embassy_stm32::Config::default();
-    config.rcc.sys = Sysclk::Pll1P;
-    config.rcc.hsi = true;
-    config.rcc.pll_src = PllSource::Hsi;
-    config.rcc.pll = Some(Pll {
-        prediv: PllPreDiv::Div8,
-        mul: PllMul::Mul216,
-        divp: Some(PllPDiv::Div2),
-        divq: Some(PllQDiv::Div9),
-        divr: Some(PllRDiv::Div2),
+    let p = embassy_stm32::init(board::config());
+
+    info!("Main starting!");
+    info!("main: stack size:  {}", unsafe {
+        core::ptr::addr_of!(_stack_start).offset_from(core::ptr::addr_of!(_stack_end))
     });
-    config.rcc.ahb_pre = AHBPrescaler::Div1;
-    config.rcc.apb1_pre = APBPrescaler::Div4;
-    config.rcc.apb2_pre = APBPrescaler::Div2;
+    info!("ROWS: {}", ROWS);
+    info!("COLS: {}", COLS);
+    info!("PLANES: {}", PLANES);
+    info!("FB size: {}", core::mem::size_of::<FBType>());
 
-    let p = embassy_stm32::init(config);
+    // DMA descriptor accounting. Only the GPDMA linked-list backends use a
+    // descriptor table; the default dumb-DMA driver has none and instead
+    // re-kicks one transfer per BCM segment repetition from the ISR.
+    #[cfg(not(any(feature = "gpdma", feature = "gpdma-2d")))]
+    info!(
+        "DMA: dumb backend (no descriptor table): {} BCM segments, {} transfers/frame",
+        FBType::BCM_SEGMENT_COUNT,
+        bcm_rep_count::<FBType>()
+    );
 
+    #[cfg(feature = "gpdma")]
+    info!(
+        "DMA: GPDMA linear linked-list: {} descriptors, {} bytes used",
+        bcm_rep_count::<FBType>(),
+        bcm_rep_count::<FBType>()
+            * core::mem::size_of::<embassy_stm32::dma::linked_list::LinearItem>()
+    );
+
+    #[cfg(feature = "gpdma-2d")]
+    info!(
+        "DMA: GPDMA 2D: {} descriptors, {} bytes used",
+        FBType::BCM_SEGMENT_COUNT,
+        FBType::BCM_SEGMENT_COUNT * core::mem::size_of::<embassy_stm32::dma::two_d::TwoDItem>()
+    );
+
+    // with the latch circuit you can pwm the blank (OE) pin to reduce brightness; here we just tie it high for full brightness
     let _pwm = Output::new(p.PC3, Level::High, Speed::High);
 
-    info!("Initializing pins");
     let pins = Hub75Pins8::new(
         (*p.PD0).into(),
         (*p.PD1).into(),
@@ -200,18 +232,24 @@ async fn main(spawner: Spawner) {
     )
     .expect("invalid pin configuration");
 
-    info!("Initializing framebuffers");
     let fb0 = FB0.init(FBType::new());
     let fb1 = FB1.init(FBType::new());
 
-    info!("Starting ISR-driven rendering");
-    let hub75 = hub75::init(
+    info!("fb0: {:?}", fb0);
+    info!("fb1: {:?}", fb1);
+
+    #[cfg(feature = "stm32f722")]
+    let dma = p.DMA2_CH5;
+    #[cfg(feature = "stm32h563")]
+    let dma = p.GPDMA1_CH7;
+
+    let hub75 = board::hub75::init(
         p.TIM1,
         p.PE9,
-        p.DMA2_CH5,
-        Irqs,
+        dma,
+        board::Irqs,
         pins,
-        Config::new().frequency(Hertz(20_000_000)),
+        Config::new().frequency(PIXEL_CLOCK),
         fb0,
     );
     info!("Hub75 started");

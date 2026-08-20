@@ -1,0 +1,20 @@
+[alias]
+# Base aliases for building/running/clippy for each board.
+#
+# The pixel clock defaults to 10 MHz; enable the `20mhz` feature for a
+# 20 MHz pixel clock, e.g.:
+#   cargo build-h563 -F 20mhz
+#
+# The dumb DMA driver is the default backend. On the STM32H563, switch to a
+# linked-list backend by appending the feature flag, e.g.:
+#   cargo build-h563 -F gpdma        # linear linked-list
+#   cargo build-h563 -F gpdma-2d     # 2D linked-list
+
+run-f722     = "run --config .cargo/config-stm32f722.toml --release --features stm32f722"
+run-h563     = "run --config .cargo/config-stm32h563.toml --release --features stm32h563"
+
+build-f722   = "build --config .cargo/config-stm32f722.toml --release --features stm32f722"
+build-h563   = "build --config .cargo/config-stm32h563.toml --release --features stm32h563"
+
+clippy-f722  = "clippy --config .cargo/config-stm32f722.toml --release --features stm32f722"
+clippy-h563  = "clippy --config .cargo/config-stm32h563.toml --release --features stm32h563"

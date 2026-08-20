@@ -81,17 +81,7 @@ pub const fn zeroed_linear_item() -> LinearItem {
 ///
 /// Equals `2^(PLANES-1)` for frame-major bitplane framebuffers.
 const fn descriptor_count<FB: FrameBuffer>() -> usize {
-    let mut total = 0;
-    let mut seq = 0;
-    while seq < FB::BCM_SEQUENCE_COUNT {
-        let mut i = 0;
-        while i < FB::BCM_SEQUENCE_LEN {
-            total += FB::BCM_SEGMENT_SHAPES[i].1;
-            i += 1;
-        }
-        seq += 1;
-    }
-    total
+    crate::framebuffer::bcm_rep_count::<FB>()
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +103,7 @@ fn item_offset(item: &LinearItem) -> u16 {
 /// `TCEM = LAST_LLI`).
 ///
 /// Compile-time assertion: the descriptor count computed from
-/// [`FrameBuffer::BCM_SEGMENT_SHAPES`] must fit into [`MAX_DESCRIPTORS`].
+/// [`FrameBuffer::BCM_SEQUENCE`] must fit into [`MAX_DESCRIPTORS`].
 ///
 /// Returns the number of active items in the chain.
 #[doc(hidden)]
@@ -137,22 +127,11 @@ pub fn build_item_chain<FB: FrameBuffer>(
         "bcm_segment_count {segment_count} out of range 1..={MAX_SEGMENTS}"
     );
 
-    // Runtime total; must agree with the static shapes used by the
-    // compile-time assertion above.
     let mut total = 0;
     for i in 0..segment_count {
         let segment = fb.bcm_segment(i);
-        debug_assert!(
-            {
-                let (shape_len, shape_reps) = FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN];
-                segment.len == shape_len && segment.reps == shape_reps
-            },
-            "bcm_segment({i}) disagrees with BCM_SEGMENT_SHAPES {:?}",
-            FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN],
-        );
         total += segment.reps;
     }
-    debug_assert_eq!(total, descriptor_count::<FB>());
     assert!(total <= MAX_DESCRIPTORS);
 
     let base = items.as_ptr() as usize;

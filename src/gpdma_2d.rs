@@ -104,14 +104,6 @@ pub fn build_item_chain_2d<FB: FrameBuffer>(
 
     for i in 0..segment_count {
         let BcmSegment { ptr, len, reps } = fb.bcm_segment(i);
-        debug_assert!(
-            {
-                let (shape_len, shape_reps) = FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN];
-                len == shape_len && reps == shape_reps
-            },
-            "bcm_segment({i}) disagrees with BCM_SEGMENT_SHAPES {:?}",
-            FB::BCM_SEGMENT_SHAPES[i % FB::BCM_SEQUENCE_LEN],
-        );
         assert!(
             (1..=2048).contains(&reps),
             "segment {i} reps {reps} out of range 1..=2048"

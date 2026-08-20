@@ -32,7 +32,7 @@ embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
 # hub75-framebuffer = { version = "0.11.0" }
-hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer.git", rev = "4e45ed4f1d62cf186f3913ced43225fd74c1a15e" }
+hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer.git", rev = "501a03dfeec4aebf3803610b56ce499efa8feabf" }
 
 [features]
 default = []
@@ -88,6 +88,7 @@ embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256
 embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
-embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 
+# [patch."https://github.com/liebman/hub75-framebuffer.git"]
+# hub75-framebuffer = { path = "../hub75-framebuffer" }

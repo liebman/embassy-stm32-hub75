@@ -1,0 +1,14 @@
+
+[target.thumbv7em-none-eabi]
+runner = "probe-rs run --chip STM32F722ZE"
+
+[build]
+target = "thumbv7em-none-eabi"
+
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tdefmt.x"]
+
+[unstable]
+build-std = ["alloc", "core"]
+
+[env]
+DEFMT_LOG = "info"
