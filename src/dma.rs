@@ -13,32 +13,24 @@
 use core::cell::RefCell;
 use core::future::poll_fn;
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Poll, Waker};
 
 use critical_section::Mutex;
 use embassy_stm32::dma::word::WordSize;
 use embassy_stm32::dma::{self, Channel, ChannelInstance, Transfer, TransferOptions};
-use embassy_stm32::gpio::OutputType;
 use embassy_stm32::interrupt::typelevel::Binding;
-use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, RoundTo, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
-use embassy_stm32::timer::{Ch1, Channel as TimChannel, GeneralInstance4Channel, TimerPin, UpDma};
+use embassy_stm32::timer::{Ch1, GeneralInstance4Channel, TimerPin, UpDma};
 use embassy_stm32::Peri;
 
-use crate::bcm::{planes_from_fb, BcmState, PlaneInfo};
+use crate::bcm::BcmState;
 use crate::framebuffer::FrameBuffer;
 use crate::{Config, Hub75Error, Hub75Pins};
 
-// ---------------------------------------------------------------------------
-// Timer slot type alias (used by macro and Hub75::new)
-// ---------------------------------------------------------------------------
-
-/// Type alias for the timer static slot used by `hub75_define!`.
+/// Re-export of [`crate::setup::TimerSlot`] for the `hub75_define!` macro.
 #[doc(hidden)]
-pub type TimerSlot<T> = Mutex<RefCell<Option<ManuallyDrop<Timer<'static, T>>>>>;
-
+pub use crate::setup::TimerSlot;
 // ---------------------------------------------------------------------------
 // IsrCore — type-erased ISR state (library code, no generics)
 // ---------------------------------------------------------------------------
@@ -51,14 +43,14 @@ struct IsrCoreState {
     word_size: WordSize,
     bcm: BcmState,
     current_fb_ptr: *const (),
-    pending_planes: Option<PlaneInfo>,
+    pending_delta: Option<isize>,
     pending_fb_ptr: *const (),
     returned_fb_ptr: *const (),
 }
 
 // SAFETY: IsrCoreState contains raw pointers (`odr_addr`, `current_fb_ptr`,
 // `pending_fb_ptr`, `returned_fb_ptr`, and the `*const u8` pointers inside
-// `PlaneInfo`) which prevent auto-`Send`. These pointers are safe to send
+// the cached `BcmSegment`s) which prevent auto-`Send`. These pointers are safe to send
 // across execution contexts because they exclusively target either:
 // - Memory-mapped GPIO ODR registers (fixed hardware addresses, valid for the
 //   entire program lifetime), or
@@ -166,16 +158,16 @@ impl IsrCore {
         if frame_boundary {
             self.frame_count.fetch_add(1, Ordering::Relaxed);
 
-            if let Some(pending) = state.pending_planes.take() {
+            if let Some(delta) = state.pending_delta.take() {
                 state.returned_fb_ptr = state.current_fb_ptr;
                 state.current_fb_ptr = state.pending_fb_ptr;
                 state.pending_fb_ptr = core::ptr::null();
-                state.bcm.update_planes(pending);
+                state.bcm.apply_delta(delta);
                 self.signal_swap_done(cs);
             }
         }
 
-        let (ptr, len) = state.bcm.current_plane();
+        let (ptr, len) = state.bcm.current_segment();
         // SAFETY: Transfer<'a> contains Channel<'a> which is just a u8 +
         // PhantomData. The channel it borrows lives in this same static,
         // so the referent outlives the reference.
@@ -204,15 +196,15 @@ impl IsrCore {
     ///
     /// # Errors
     /// Returns `Hub75Error::NotInitialised` if the driver state has not been set up.
-    pub async unsafe fn swap_inner(
-        &self,
-        new_planes: PlaneInfo,
-        new_fb_ptr: *const (),
-    ) -> Result<*const (), Hub75Error> {
+    pub async unsafe fn swap_inner(&self, new_fb_ptr: *const ()) -> Result<*const (), Hub75Error> {
         critical_section::with(|cs| {
             let mut borrow = self.state.borrow_ref_mut(cs);
             let state = borrow.as_mut().ok_or(Hub75Error::NotInitialised)?;
-            state.pending_planes = Some(new_planes);
+            // The old and new framebuffers have the same `FB` type and
+            // therefore identical layout, so every cached segment pointer
+            // shifts by the same byte delta.
+            let delta = new_fb_ptr as isize - state.current_fb_ptr as isize;
+            state.pending_delta = Some(delta);
             state.pending_fb_ptr = new_fb_ptr;
             self.swap_done.store(false, Ordering::Relaxed);
             Ok(())
@@ -250,27 +242,26 @@ impl IsrCore {
         *self.state.borrow_ref_mut(cs) = Some(new_state);
     }
 
-    fn start_first_transfer(
+    fn start_first_transfer<FB: FrameBuffer>(
         &self,
         cs: critical_section::CriticalSection,
-        planes: PlaneInfo,
-        plane_count: usize,
+        fb: &FB,
         fb_ptr: *const (),
     ) {
         let mut borrow = self.state.borrow_ref_mut(cs);
         // this can't happen because this is only called from Hub75::new and the state is initialised there
         let state = borrow.as_mut().expect("Hub75 not initialised");
 
-        state.bcm.reset_with_planes(planes, plane_count);
+        state.bcm.load(fb);
         state.current_fb_ptr = fb_ptr;
-        state.pending_planes = None;
+        state.pending_delta = None;
         state.pending_fb_ptr = core::ptr::null();
         state.returned_fb_ptr = core::ptr::null();
 
         self.swap_done.store(false, Ordering::Relaxed);
         self.frame_count.store(0, Ordering::Relaxed);
 
-        let (ptr, len) = state.bcm.current_plane();
+        let (ptr, len) = state.bcm.current_segment();
         state.transfer = Some(unsafe {
             kick_dma(
                 &mut state.channel,
@@ -326,33 +317,12 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
         // insure the framebuffer wordsize matches the pins we are passing at compile time
         FB: FrameBuffer<Word = P::Word>,
     {
-        let odr_addr = pins.configure_and_get_odr(config.gpio_speed).as_ptr();
-
-        let clock_pin = PwmPin::new(clock_pin, OutputType::PushPull);
-
-        let timer = Timer::new(tim);
-        timer.set_counting_mode(CountingMode::EdgeAlignedUp);
-        timer.set_frequency(config.frequency, RoundTo::Slower);
-        timer.enable_outputs();
-
-        timer.set_output_compare_mode(TimChannel::Ch1, OutputCompareMode::PwmMode2);
-        timer.set_output_compare_preload(TimChannel::Ch1, true);
-        timer.set_autoreload_preload(true);
-
-        let max: u32 = timer.get_max_compare_value().into();
-        timer.set_compare_value(
-            TimChannel::Ch1,
-            (u64::from(max) * 4 / 5).try_into().unwrap(),
-        );
-
-        timer.enable_channel(TimChannel::Ch1, true);
-        timer.generate_update_event();
-        timer.enable_update_dma(true);
+        let hw = crate::setup::hardware(tim, clock_pin, pins, &config);
+        let odr_addr = hw.odr_addr;
 
         let dma_request = <D as UpDma<T>>::request(&*dma_ch);
         let channel = Channel::new(dma_ch, dma_irq);
 
-        let (planes, plane_count) = planes_from_fb(fb);
         let fb_ptr = core::ptr::from_ref::<FB>(fb).cast::<()>();
 
         critical_section::with(|cs| {
@@ -363,10 +333,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
             // an actual borrow. Wrapped in ManuallyDrop to prevent
             // rcc::disable on drop. This assumption is coupled to the
             // embassy-stm32 version pinned in Cargo.toml.
-            let timer_static: ManuallyDrop<Timer<'static, T>> = ManuallyDrop::new(unsafe {
-                core::mem::transmute::<Timer<'_, T>, Timer<'static, T>>(timer)
-            });
-            *timer_slot.borrow_ref_mut(cs) = Some(timer_static);
+            unsafe { crate::setup::store_timer(hw.timer, timer_slot, cs) };
 
             // SAFETY: Channel<'d> → Channel<'static>. The DMA channel
             // peripheral is consumed by this driver and will never be
@@ -386,19 +353,19 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
                     word_size: P::DMA_WORD_SIZE,
                     bcm: BcmState::new(),
                     current_fb_ptr: core::ptr::null(),
-                    pending_planes: None,
+                    pending_delta: None,
                     pending_fb_ptr: core::ptr::null(),
                     returned_fb_ptr: core::ptr::null(),
                 },
             );
 
-            core.start_first_transfer(cs, planes, plane_count, fb_ptr);
+            core.start_first_transfer(cs, fb, fb_ptr);
 
             timer_slot.borrow_ref(cs).as_ref().unwrap().start();
         });
 
         Self {
-            _clock_pin: clock_pin,
+            _clock_pin: hw.clock_pin,
             core,
             _fb: PhantomData,
         }
@@ -413,17 +380,17 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
     /// Replace the displayed framebuffer, returning the previously-displayed one.
     ///
     /// Queues `new_fb` for display and yields until the ISR reaches a BCM
-    /// frame boundary, at which point plane pointers are swapped atomically.
+    /// frame boundary, at which point all cached BCM segment pointers are
+    /// shifted to the new framebuffer atomically.
     /// Returns an exclusive reference to the old framebuffer that is no longer
     /// being read by the ISR.
     ///
     /// # Errors
     /// Returns `Hub75Error::NotInitialised` if the driver has not been initialised.
     pub async fn swap(&mut self, new_fb: &'static mut FB) -> Result<&'static mut FB, Hub75Error> {
-        let (new_planes, _) = planes_from_fb(new_fb);
         let fb_ptr = core::ptr::from_ref::<FB>(new_fb).cast::<()>();
         // SAFETY: fb_ptr originated from a valid &'static mut FB.
-        let old_ptr = unsafe { self.core.swap_inner(new_planes, fb_ptr).await? };
+        let old_ptr = unsafe { self.core.swap_inner(fb_ptr).await? };
         // SAFETY: The ISR atomically swapped away from this buffer at the frame
         // boundary — it is no longer being read. The pointer originated from a
         // `&'static mut FB` passed to a previous init or swap call.
@@ -465,6 +432,7 @@ impl<'d, T: GeneralInstance4Channel, FB: FrameBuffer + 'static> Hub75<'d, T, FB>
 ///     fb0,
 /// );
 /// ```
+#[cfg(not(any(feature = "gpdma", feature = "gpdma-2d")))]
 #[macro_export]
 macro_rules! hub75_define {
     ($mod_name:ident, $timer:ty, $dma_ch:ty) => {

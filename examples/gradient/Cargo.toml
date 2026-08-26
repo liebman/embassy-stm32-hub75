@@ -1,0 +1,113 @@
+[package]
+name = "gradient"
+description = "Merged embassy (async) plain HUB75 demo for STM32F722 / STM32H563 / STM32H723"
+repository = "https://github.com/liebman/embassy-stm32-hub75"
+edition = "2021"
+version = "0.1.0"
+publish = false
+license = "MIT OR Apache-2.0"
+rust-version = "1.88"
+
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = "s"
+overflow-checks = false
+
+[profile.dev]
+debug = true  # Symbols are nice and they don't increase the size on Flash
+opt-level = 2
+
+[dependencies]
+embassy-stm32-hub75 = { path = "../../", default-features = false }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+defmt = { version = "1.1.1", optional = true }
+defmt-rtt = { version = "1.3.0", optional = true }
+embassy-stm32 = { version = "0.6.0", features = [
+    "time-driver-tim2",
+    "memory-x",
+] }
+embassy-executor = { version = "0.10.0", features = [
+    "platform-cortex-m",
+    "executor-thread",
+] }
+
+embedded-graphics = "0.8.2"
+embassy-time = "0.5.1"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+static_cell = "2.1.1"
+heapless = "0.9.3"
+
+[features]
+default = ["defmt", "skip-black-pixels"]
+
+# ---- board selection (exactly one) ----
+stm32f722 = [
+    "embassy-stm32/stm32f722ze",
+]
+stm32h563 = [
+    "embassy-stm32/stm32h563zi",
+]
+stm32h723 = [
+    "embassy-stm32/stm32h723zg",
+]
+
+# ---- pixel clock ----
+# Default is 10 MHz; enable `20mhz` for a 20 MHz panel clock.
+20mhz = []
+
+# ---- optional backend switches (stm32h563 only) ----
+# The dumb DMA driver is the default; `gpdma` / `gpdma-2d` switch to the
+# linked-list backends if available.
+gpdma = ["embassy-stm32-hub75/gpdma"]
+gpdma-2d = ["embassy-stm32-hub75/gpdma-2d"]
+
+# use row-bcm for the framebuffer instead of frame-bcm
+row = []
+
+# ---- logging ----
+defmt = [
+    "embassy-stm32-hub75/defmt",
+    "embassy-stm32/defmt",
+    "dep:defmt",
+    "dep:defmt-rtt",
+]
+
+# ---- embassy-stm32-hub75 feature pass-through ----
+skip-black-pixels = ["embassy-stm32-hub75/skip-black-pixels"]
+invert-oe = ["embassy-stm32-hub75/invert-oe"]
+tail-closes-latch = ["embassy-stm32-hub75/tail-closes-latch"]
+lead-blank-1 = ["embassy-stm32-hub75/lead-blank-1"]
+lead-blank-2 = ["embassy-stm32-hub75/lead-blank-2"]
+lead-blank-4 = ["embassy-stm32-hub75/lead-blank-4"]
+lead-blank-8 = ["embassy-stm32-hub75/lead-blank-8"]
+lead-blank-16 = ["embassy-stm32-hub75/lead-blank-16"]
+lead-blank-32 = ["embassy-stm32-hub75/lead-blank-32"]
+trail-blank-1 = ["embassy-stm32-hub75/trail-blank-1"]
+trail-blank-2 = ["embassy-stm32-hub75/trail-blank-2"]
+trail-blank-4 = ["embassy-stm32-hub75/trail-blank-4"]
+trail-blank-8 = ["embassy-stm32-hub75/trail-blank-8"]
+trail-blank-16 = ["embassy-stm32-hub75/trail-blank-16"]
+trail-blank-32 = ["embassy-stm32-hub75/trail-blank-32"]
+inter-row-blank-4 = ["embassy-stm32-hub75/inter-row-blank-4"]
+inter-row-blank-8 = ["embassy-stm32-hub75/inter-row-blank-8"]
+inter-row-blank-16 = ["embassy-stm32-hub75/inter-row-blank-16"]
+inter-row-blank-32 = ["embassy-stm32-hub75/inter-row-blank-32"]
+reverse-row-order = ["embassy-stm32-hub75/reverse-row-order"]
+unsafe-swap-wait-1 = ["embassy-stm32-hub75/unsafe-swap-wait-1"]
+unsafe-swap-wait-0 = ["embassy-stm32-hub75/unsafe-swap-wait-0"]
+
+[patch.crates-io]
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+
+# [patch."https://github.com/liebman/hub75-framebuffer.git"]
+# hub75-framebuffer = { path = "../../../hub75-framebuffer" }

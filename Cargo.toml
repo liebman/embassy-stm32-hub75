@@ -26,12 +26,12 @@ opt-level = 2
 
 [dependencies]
 critical-section = "1.2"
-defmt = { version = "1.0.1", optional = true }
+defmt = { version = "1.1.1", optional = true }
 embedded-graphics = "0.8.2"
 embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
-hub75-framebuffer = "0.10.0"
+hub75-framebuffer = { version = "0.12.0" }
 
 [features]
 default = []
@@ -55,17 +55,42 @@ trail-blank-2 = ["hub75-framebuffer/trail-blank-2"]
 trail-blank-4 = ["hub75-framebuffer/trail-blank-4"]
 trail-blank-8 = ["hub75-framebuffer/trail-blank-8"]
 trail-blank-16 = ["hub75-framebuffer/trail-blank-16"]
+lead-blank-32 = ["hub75-framebuffer/lead-blank-32"]
+trail-blank-32 = ["hub75-framebuffer/trail-blank-32"]
+inter-row-blank-4 = ["hub75-framebuffer/inter-row-blank-4"]
+inter-row-blank-8 = ["hub75-framebuffer/inter-row-blank-8"]
+inter-row-blank-16 = ["hub75-framebuffer/inter-row-blank-16"]
+inter-row-blank-32 = ["hub75-framebuffer/inter-row-blank-32"]
+reverse-row-order = ["hub75-framebuffer/reverse-row-order"]
+gpdma = []
+gpdma-2d = ["gpdma"]
+unsafe-swap-wait-1 = []
+unsafe-swap-wait-0 = []
 
 # only used for documentation!
 stm32f722 = ["embassy-stm32/stm32f722ze"]
 stm32h723 = ["embassy-stm32/stm32h723zg"]
 stm32wl55 = ["embassy-stm32/stm32wl55jc-cm4"]
+stm32u575 = ["embassy-stm32/stm32u575zi"]
+stm32h563 = ["embassy-stm32/stm32h563zi"]
 
 [package.metadata.docs.rs]
 features = ["stm32f722"]
 targets = ["thumbv7em-none-eabi"]
 
+[patch.crates-io]
+# embassy-stm32 = { path = "../embassy/embassy-stm32" }
+# embassy-time-driver = { path = "../embassy/embassy-time-driver" }
+# embassy-time = { path = "../embassy/embassy-time" }
+# embassy-sync = { path = "../embassy/embassy-sync" }
+# embassy-executor = { path = "../embassy/embassy-executor" }
+# embassy-futures = { path = "../embassy/embassy-futures" }
 
-# [patch.crates-io]
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "8256076905f8ed5c1d52a5123ec65b6c363e9272" }
 
+# [patch."https://github.com/liebman/hub75-framebuffer.git"]
 # hub75-framebuffer = { path = "../hub75-framebuffer" }
