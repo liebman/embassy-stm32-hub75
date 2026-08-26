@@ -577,8 +577,9 @@ dependencies = [
 
 [[package]]
 name = "hub75-framebuffer"
-version = "0.11.0"
-source = "git+https://github.com/liebman/hub75-framebuffer.git?rev=9de7b9e9e510aabe2255485009cc8ba70c984db5#9de7b9e9e510aabe2255485009cc8ba70c984db5"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60a58ceddd2164cf1ecffbf679032b479f589c200c1bc65d530a47c70c84c7ad"
 dependencies = [
  "bitfield 0.19.5",
  "defmt 1.1.1",

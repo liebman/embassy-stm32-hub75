@@ -31,8 +31,7 @@ embedded-graphics = "0.8.2"
 embassy-stm32 = { version = "0.6.0", default-features = false, features = [
     "unstable-pac",
 ] }
-# hub75-framebuffer = { version = "0.11.0" }
-hub75-framebuffer = { git = "https://github.com/liebman/hub75-framebuffer.git", rev = "9de7b9e9e510aabe2255485009cc8ba70c984db5" }
+hub75-framebuffer = { version = "0.12.0" }
 
 [features]
 default = []
